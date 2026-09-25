@@ -1,0 +1,19 @@
+{
+ "batchcomplete": "",
+ "query": {
+  "pages": {
+   "50567": {
+    "pageid": 50567,
+    "ns": 0,
+    "title": "Post",
+    "contentmodel": "wikitext",
+    "pagelanguage": "pl",
+    "pagelanguagehtmlcode": "pl",
+    "pagelanguagedir": "ltr",
+    "touched": "2026-09-22T07:51:55Z",
+    "lastrevid": 80278111,
+    "length": 25089
+   }
+  }
+ }
+}

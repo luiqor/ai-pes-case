@@ -1,0 +1,134 @@
+{
+ "searchinfo": {
+  "search": "intermittent fasting"
+ },
+ "search": [
+  {
+   "id": "Q1666254",
+   "title": "Q1666254",
+   "pageid": 1599841,
+   "concepturi": "http://www.wikidata.org/entity/Q1666254",
+   "repository": "wikidata",
+   "url": "//www.wikidata.org/wiki/Q1666254",
+   "display": {
+    "label": {
+     "value": "intermittent fasting",
+     "language": "en"
+    },
+    "description": {
+     "value": "a diet that cycles between a period of fasting and non-fasting",
+     "language": "en"
+    }
+   },
+   "label": "intermittent fasting",
+   "description": "a diet that cycles between a period of fasting and non-fasting",
+   "match": {
+    "type": "label",
+    "language": "en",
+    "text": "intermittent fasting"
+   }
+  },
+  {
+   "id": "Q112575736",
+   "title": "Q112575736",
+   "pageid": 107465636,
+   "concepturi": "http://www.wikidata.org/entity/Q112575736",
+   "repository": "wikidata",
+   "url": "//www.wikidata.org/wiki/Q112575736",
+   "display": {
+    "label": {
+     "value": "Intermittent Fasting Can Make Us Healthier",
+     "language": "en"
+    },
+    "description": {
+     "value": "Article published in Scientific European on 15 January 2019",
+     "language": "en"
+    }
+   },
+   "label": "Intermittent Fasting Can Make Us Healthier",
+   "description": "Article published in Scientific European on 15 January 2019",
+   "match": {
+    "type": "label",
+    "language": "en",
+    "text": "Intermittent Fasting Can Make Us Healthier"
+   }
+  },
+  {
+   "id": "Q79110871",
+   "title": "Q79110871",
+   "pageid": 78557161,
+   "concepturi": "http://www.wikidata.org/entity/Q79110871",
+   "repository": "wikidata",
+   "url": "//www.wikidata.org/wiki/Q79110871",
+   "display": {
+    "label": {
+     "value": "Intermittent Fasting as a Means to Lose Fluid Overload and Weight in Complicated Obesity",
+     "language": "en"
+    },
+    "description": {
+     "value": "clinical trial",
+     "language": "en"
+    }
+   },
+   "label": "Intermittent Fasting as a Means to Lose Fluid Overload and Weight in Complicated Obesity",
+   "description": "clinical trial",
+   "match": {
+    "type": "label",
+    "language": "en",
+    "text": "Intermittent Fasting as a Means to Lose Fluid Overload and Weight in Complicated Obesity"
+   }
+  },
+  {
+   "id": "Q63574657",
+   "title": "Q63574657",
+   "pageid": 63298520,
+   "concepturi": "http://www.wikidata.org/entity/Q63574657",
+   "repository": "wikidata",
+   "url": "//www.wikidata.org/wiki/Q63574657",
+   "display": {
+    "label": {
+     "value": "Intermittent Fasting Versus Daily Caloric Restriction for Weight Loss",
+     "language": "en"
+    },
+    "description": {
+     "value": "clinical trial",
+     "language": "en"
+    }
+   },
+   "label": "Intermittent Fasting Versus Daily Caloric Restriction for Weight Loss",
+   "description": "clinical trial",
+   "match": {
+    "type": "label",
+    "language": "en",
+    "text": "Intermittent Fasting Versus Daily Caloric Restriction for Weight Loss"
+   }
+  },
+  {
+   "id": "Q113910824",
+   "title": "Q113910824",
+   "pageid": 108651761,
+   "concepturi": "http://www.wikidata.org/entity/Q113910824",
+   "repository": "wikidata",
+   "url": "//www.wikidata.org/wiki/Q113910824",
+   "display": {
+    "label": {
+     "value": "Intermittent Fasting on the Incidence of Gestational Diabetes Mellitus Obese Pregnant Women in 3rd Trimester",
+     "language": "en"
+    },
+    "description": {
+     "value": "clinical trial",
+     "language": "en"
+    }
+   },
+   "label": "Intermittent Fasting on the Incidence of Gestational Diabetes Mellitus Obese Pregnant Women in 3rd Trimester",
+   "description": "clinical trial",
+   "match": {
+    "type": "label",
+    "language": "en",
+    "text": "Intermittent Fasting on the Incidence of Gestational Diabetes Mellitus Obese Pregnant Women in 3rd Trimester"
+   }
+  }
+ ],
+ "search-continue": 5,
+ "success": 1
+}

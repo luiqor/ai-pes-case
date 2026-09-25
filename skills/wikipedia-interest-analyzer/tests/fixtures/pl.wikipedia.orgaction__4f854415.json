@@ -1,0 +1,79 @@
+{
+ "batchcomplete": "",
+ "query": {
+  "pages": {
+   "638258": {
+    "pageid": 638258,
+    "ns": 0,
+    "title": "Chelatacja (medycyna)",
+    "contentmodel": "wikitext",
+    "pagelanguage": "pl",
+    "pagelanguagehtmlcode": "pl",
+    "pagelanguagedir": "ltr",
+    "touched": "2026-09-22T07:52:25Z",
+    "lastrevid": 77331129,
+    "length": 61678
+   },
+   "74017": {
+    "pageid": 74017,
+    "ns": 0,
+    "title": "Głodówka lecznicza",
+    "contentmodel": "wikitext",
+    "pagelanguage": "pl",
+    "pagelanguagehtmlcode": "pl",
+    "pagelanguagedir": "ltr",
+    "touched": "2026-09-22T07:51:56Z",
+    "lastrevid": 79407501,
+    "length": 21829
+   },
+   "3331077": {
+    "pageid": 3331077,
+    "ns": 0,
+    "title": "Paleolityczny styl życia",
+    "contentmodel": "wikitext",
+    "pagelanguage": "pl",
+    "pagelanguagehtmlcode": "pl",
+    "pagelanguagedir": "ltr",
+    "touched": "2026-09-22T07:53:38Z",
+    "lastrevid": 80208414,
+    "length": 66610
+   },
+   "46716": {
+    "pageid": 46716,
+    "ns": 0,
+    "title": "Skróty i skrótowce używane w medycynie",
+    "contentmodel": "wikitext",
+    "pagelanguage": "pl",
+    "pagelanguagehtmlcode": "pl",
+    "pagelanguagedir": "ltr",
+    "touched": "2026-09-08T15:25:36Z",
+    "lastrevid": 80135140,
+    "length": 59914
+   },
+   "46248": {
+    "pageid": 46248,
+    "ns": 0,
+    "title": "Skróty i skrótowce używane w naukach biologicznych",
+    "contentmodel": "wikitext",
+    "pagelanguage": "pl",
+    "pagelanguagehtmlcode": "pl",
+    "pagelanguagedir": "ltr",
+    "touched": "2026-07-06T18:54:14Z",
+    "lastrevid": 80135215,
+    "length": 53966
+   },
+   "1238433": {
+    "pageid": 1238433,
+    "ns": 0,
+    "title": "Stres oksydacyjny",
+    "contentmodel": "wikitext",
+    "pagelanguage": "pl",
+    "pagelanguagehtmlcode": "pl",
+    "pagelanguagedir": "ltr",
+    "touched": "2026-09-22T15:32:40Z",
+    "lastrevid": 80639941,
+    "length": 18535
+   }
+  }
+ }
+}

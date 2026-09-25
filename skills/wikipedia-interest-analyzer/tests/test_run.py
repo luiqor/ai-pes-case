@@ -1,0 +1,318 @@
+"""End-to-end CLI tests: the whole workflow, offline, through ``run.py``.
+
+These are the tests that make the skill safe to hand to a cheap model: they
+prove a bare `run.py all` produces every artifact, that a gap is reported
+rather than filled, and that a report which cannot fit one page exits non-zero
+instead of emitting a two-page PDF.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+import common
+import run as run_mod
+
+ARTIFACTS = (
+    "series.json",
+    "analysis.json",
+    "chart.png",
+    "chart.svg",
+    "report.html",
+    "report.pdf",
+)
+
+
+GOLDEN_INIT_ARGS = [
+    "init",
+    "--topic", "intermittent fasting",
+    "--langs", "pl,cs",
+    "--since", "2024-10",
+    "--until", "2026-08",
+]
+
+
+def _init(tmp_path) -> str:
+    """Arrange: write the golden study manifest.
+
+    No assertion lives here -- the test whose behavior *is* init checks the
+    exit code itself, so failure output points at the test, not this helper.
+    """
+    path = str(tmp_path / "study.json")
+    run_mod.main([*GOLDEN_INIT_ARGS, "--study", path])
+    return path
+
+
+def test_init_writes_a_manifest(tmp_path):
+    path = str(tmp_path / "study.json")
+    assert run_mod.main([*GOLDEN_INIT_ARGS, "--study", path]) == 0
+
+    study = common.read_json(path)
+    assert study["topic"] == "intermittent fasting"
+    assert study["languages"] == ["pl", "cs"]
+    assert study["window"] == {"since": "2024-10", "until": "2026-08"}
+    assert study["overrides"] == {}
+    assert study["granularity"] == "monthly"
+
+
+def test_init_refuses_to_clobber_an_existing_study(tmp_path):
+    path = _init(tmp_path)
+    assert run_mod.main(["init", "--topic", "x", "--langs", "pl", "--study", path]) == 1
+    assert common.read_json(path)["topic"] == "intermittent fasting"
+
+
+def test_status_reports_the_resolved_article_and_the_gap(tmp_path, capsys):
+    path = _init(tmp_path)
+    assert run_mod.main(["all", "--stage", "resolve", "--study", path]) == 0
+    capsys.readouterr()  # drop init/resolve chatter, keep only the status output
+
+    assert run_mod.main(["status", "--study", path]) == 0
+    status = capsys.readouterr().out
+
+    assert "cs: Přerušovaný půst" in status
+    assert "pl: GAP" in status
+    assert "candidate:" in status, "a gap must expose candidates to choose from"
+
+
+def test_override_is_recorded_in_the_study(tmp_path):
+    path = _init(tmp_path)
+    assert run_mod.main(["all", "--stage", "resolve", "--study", path]) == 0
+
+    assert (
+        run_mod.main(["override", "--study", path, "--lang", "pl", "--title", "Post"])
+        == 0
+    )
+
+    assert common.read_json(path)["overrides"] == {"pl": "Post"}
+
+
+def test_status_before_resolution_says_so(tmp_path, capsys):
+    path = _init(tmp_path)
+    assert run_mod.main(["status", "--study", path]) == 0
+    assert "not resolved yet" in capsys.readouterr().out
+
+
+def test_override_rejects_a_language_outside_the_study(tmp_path):
+    path = _init(tmp_path)
+    assert run_mod.main(["override", "--study", path, "--lang", "uk", "--title", "x"]) == 1
+
+
+def test_full_pipeline_produces_every_artifact(tmp_path):
+    path = _init(tmp_path)
+    assert run_mod.main(["override", "--study", path, "--lang", "pl", "--title", "Post"]) == 0
+
+    out = tmp_path / "out"
+    assert run_mod.main(["all", "--study", path, "--out", str(out)]) == 0
+
+    # The manifest lives beside the invocation, not in the output directory.
+    assert Path(path).is_file()
+    for name in ARTIFACTS:
+        assert (out / name).is_file(), f"missing {name}"
+
+    analysis = common.read_json(out / "analysis.json")
+    assert set(analysis["metrics"]) == {"pl", "cs"}
+    assert sum(analysis["metrics"]["pl"]["series"]["article_views"]) == 38_863
+
+
+def test_pipeline_reports_a_gap_end_to_end(tmp_path):
+    path = _init(tmp_path)
+    out = tmp_path / "out"
+    assert run_mod.main(["all", "--study", path, "--out", str(out)]) == 0
+
+    analysis = common.read_json(out / "analysis.json")
+    assert analysis["gaps"] == ["pl"]
+    assert set(analysis["metrics"]) == {"cs"}
+    assert any("never filled with a substitute" in x for x in analysis["limitations"])
+
+    # The gap is visible in the report too, not just in the JSON.
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert "no article exists" in html
+
+
+def test_stage_can_be_run_independently(tmp_path, monkeypatch):
+    path = _init(tmp_path)
+    monkeypatch.chdir(tmp_path)  # --out defaults to the cwd, so watch it
+
+    assert run_mod.main(["all", "--stage", "resolve", "--study", path]) == 0
+
+    assert common.read_json(path)["resolution"]["qid"] == "Q1666254"
+    # resolve must stop before fetch: no artifacts in the study dir or the cwd.
+    assert not (tmp_path / "series.json").exists()
+    assert not (tmp_path / "analysis.json").exists()
+
+
+def test_unresolvable_stage_fails_with_a_clear_message(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    study = tmp_path / "study.json"
+    common.write_json(study, {"topic": "x", "languages": ["pl"]})
+    # No resolution yet: fetch must refuse rather than guess.
+    assert run_mod.main(["all", "--stage", "fetch", "--study", str(study), "--out", str(out)]) == 1
+
+
+def test_report_stage_exits_non_zero_when_the_pdf_cannot_fit(
+    tmp_path, golden_analysis
+):
+    out = tmp_path / "out"
+    out.mkdir()
+    study = tmp_path / "study.json"
+    common.write_json(study, {"topic": "intermittent fasting", "languages": ["pl", "cs"]})
+
+    bloated = dict(golden_analysis)
+    bloated["limitations"] = [
+        f"Reason {index}: far too much text " + "detail " * 200
+        for index in range(12)
+    ]
+    common.write_json(out / "analysis.json", bloated)
+
+    rc = run_mod.main(["all", "--stage", "report", "--study", str(study), "--out", str(out)])
+
+    assert rc == 1, "an over-long report must fail, not silently use two pages"
+    assert (out / "report.html").is_file(), "HTML has no page limit"
+    assert not (out / "report.pdf").exists()
+
+
+def test_clear_cache_is_available(tmp_path, monkeypatch, capsys):
+    # Redirect the cache so the developer's real cache survives the test run.
+    monkeypatch.setattr(common, "CACHE_DIR", tmp_path / "cache")
+    assert run_mod.main(["clear-cache"]) == 0
+    assert "cached response" in capsys.readouterr().out
+
+
+def test_bare_invocation_defaults_to_all(tmp_path):
+    """`run.py --out dir` must behave like `run.py all --out dir`."""
+    path = _init(tmp_path)
+    out = tmp_path / "out"
+    assert run_mod.main(["--study", path, "--out", str(out)]) == 0
+    assert (out / "report.pdf").is_file()
+
+
+# --- regressions from the cheap-model end-to-end test ------------------------
+def test_resolve_subcommand_exists_and_stops_before_fetching(tmp_path):
+    """`status` says "run 'run.py resolve'", so `resolve` must be a real command.
+
+    Found by an agent following SKILL.md literally: it was told to run a command
+    that did not exist and had to guess `all --stage resolve` from --help.
+    """
+    path = _init(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # `resolve` writes nothing outside the manifest, so it must not advertise --out.
+    assert run_mod.main(["resolve", "--study", path]) == 0
+
+    assert common.read_json(path)["resolution"]["qid"] == "Q1666254"
+    assert not (out / "series.json").exists(), "resolve must stop before fetching"
+    assert not (out / "analysis.json").exists()
+
+
+def test_messages_never_reference_a_subcommand_that_does_not_exist():
+    """Meta-test: no message may name a command the parser does not offer.
+
+    This is the class of bug that made the agent guess: a string like
+    "run 'run.py fetch' first" pointing at a subcommand that was never defined.
+    """
+    source = Path(run_mod.__file__).read_text(encoding="utf-8")
+    referenced = set(re.findall(r"run\.py ([a-z][a-z-]*)", source))
+    missing = referenced - set(run_mod.SUBCOMMANDS)
+    assert not missing, f"messages reference non-existent subcommands: {sorted(missing)}"
+
+
+@pytest.mark.parametrize("command", sorted(run_mod.SUBCOMMANDS))
+def test_subcommand_offers_a_help_screen(command):
+    with pytest.raises(SystemExit) as excinfo:
+        run_mod.main([command, "--help"])
+
+    assert excinfo.value.code == 0
+
+
+def test_status_lists_runner_up_concepts_for_re_picking(tmp_path, capsys):
+    """Step 2 exists to catch the wrong Q-item, so the alternatives must show."""
+    path = _init(tmp_path)
+    assert run_mod.main(["resolve", "--study", path]) == 0
+    capsys.readouterr()
+
+    assert run_mod.main(["status", "--study", path]) == 0
+    out = capsys.readouterr().out
+
+    assert "hits:" in out
+    assert "-> Q1666254" in out, "the chosen concept must be marked"
+    assert re.search(r"(?m)^ {2}\s+Q\d+", out), "runner-up concepts must be listed"
+    assert "--qid" in out, "the user must be told how to re-pick"
+
+
+def test_status_shows_the_effective_window_not_default(tmp_path, capsys):
+    """`(default) .. (default)` is unreadable; show the dates the run will use."""
+    path = str(tmp_path / "study.json")
+    assert run_mod.main(["init", "--topic", "x", "--langs", "pl", "--study", path]) == 0
+
+    assert run_mod.main(["status", "--study", path]) == 0
+    line = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("window:"))
+
+    assert "(default)" not in line, "an unset window must still show real dates"
+    assert re.search(r"window:\s+\d{4}-\d{2} \.\. \d{4}-\d{2}", line), line
+
+
+def test_init_hints_point_at_real_commands(tmp_path, capsys):
+    path = _init(tmp_path)
+    out = capsys.readouterr().out
+    assert "run.py resolve --study" in out
+    assert "run.py all --study" in out and "--out" in out
+
+
+def test_init_warns_when_the_window_cannot_be_split_comparably(tmp_path, capsys):
+    """The warning must arrive at `init`, not three stages later."""
+    path = str(tmp_path / "study.json")
+    assert (
+        run_mod.main(
+            ["init", "--topic", "x", "--langs", "pl", "--study", path,
+             "--since", "2023-01", "--until", "2026-08"]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert "capped at medium" in captured.err
+    assert "2023-01 .. 2026-08" in captured.out
+
+
+def test_resolve_has_no_out_flag_because_it_writes_no_results():
+    """A flag that does nothing is misleading."""
+    parser = run_mod.build_parser()
+    resolve_parser = next(
+        action for action in parser._subparsers._group_actions
+        if action.dest == "command"
+    ).choices["resolve"]
+    assert "--out" not in resolve_parser.format_help()
+
+
+def test_clip_cuts_on_a_word_boundary():
+    """A raw [:80] sliced descriptions mid-word (… "Diese Pro)")."""
+    text = (
+        "Wurde. Es ist einzeln und mit Learning English Lesson Two "
+        "erhältlich. Diese Produktion erschien im Jahr 1996 auf CD."
+    )
+    clipped = common.clip(text, 60)
+
+    assert len(clipped) <= 63
+    assert not clipped.endswith("Pro)"), "must not stop mid-word"
+    assert clipped.endswith("...")
+    assert common.clip("short", 60) == "short"
+    # No space to break on -> fall back to a hard cut rather than returning all.
+    assert common.clip("x" * 200, 60).startswith("x" * 60)
+
+
+def test_status_also_surfaces_the_window_warning(tmp_path, capsys):
+    path = str(tmp_path / "study.json")
+    assert (
+        run_mod.main(
+            ["init", "--topic", "x", "--langs", "pl", "--study", path,
+             "--since", "2023-01", "--until", "2026-08"]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert run_mod.main(["status", "--study", path]) == 0
+    assert "capped at medium" in capsys.readouterr().err

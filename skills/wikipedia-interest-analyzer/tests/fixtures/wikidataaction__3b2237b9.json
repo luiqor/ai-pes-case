@@ -1,0 +1,37 @@
+{
+ "entities": {
+  "Q1666254": {
+   "type": "item",
+   "id": "Q1666254",
+   "labels": {
+    "en": {
+     "language": "en",
+     "value": "intermittent fasting"
+    },
+    "cs": {
+     "language": "cs",
+     "value": "Přerušovaný půst"
+    }
+   },
+   "descriptions": {
+    "en": {
+     "language": "en",
+     "value": "a diet that cycles between a period of fasting and non-fasting"
+    }
+   },
+   "sitelinks": {
+    "cswiki": {
+     "site": "cswiki",
+     "title": "Přerušovaný půst",
+     "badges": []
+    },
+    "enwiki": {
+     "site": "enwiki",
+     "title": "Intermittent fasting",
+     "badges": []
+    }
+   }
+  }
+ },
+ "success": 1
+}

@@ -1,0 +1,13 @@
+{
+  "https://cs.wikipedia.org/w/api.php?format=json&action=query&titles=P%C5%99eru%C5%A1ovan%C3%BD+p%C5%AFst&prop=info": "cs.wikipedia.orgaction__18c78580.json",
+  "https://pl.wikipedia.org/w/api.php?format=json&action=query&list=search&srsearch=intermittent+fasting&srnamespace=0&srlimit=9": "pl.wikipedia.orgaction__74b3b9d2.json",
+  "https://pl.wikipedia.org/w/api.php?format=json&action=query&titles=G%C5%82%C3%B3d%C3%B3wka+lecznicza&prop=info": "pl.wikipedia.orgaction__1d40eaf4.json",
+  "https://pl.wikipedia.org/w/api.php?format=json&action=query&titles=Post&prop=info": "pl.wikipedia.orgaction__2cc46a7b.json",
+  "https://pl.wikipedia.org/w/api.php?format=json&action=query&titles=Stres+oksydacyjny%7CG%C5%82od%C3%B3wka+lecznicza%7CPaleolityczny+styl+%C5%BCycia%7CSkr%C3%B3ty+i+skr%C3%B3towce+u%C5%BCywane+w+medycynie%7CChelatacja+%28medycyna%29%7CSkr%C3%B3ty+i+skr%C3%B3towce+u%C5%BCywane+w+naukach+biologicznych&prop=info": "pl.wikipedia.orgaction__4f854415.json",
+  "https://wikimedia.org/api/rest_v1/metrics/pageviews/aggregate/cs.wikipedia.org/all-access/user/monthly/2024100100/2026090100": "wikimedia.orgpageviews_aggregate_cs.wikipedia.org_all-access_user_monthly_2024100100_2026090100__556c7a29.json",
+  "https://wikimedia.org/api/rest_v1/metrics/pageviews/aggregate/pl.wikipedia.org/all-access/user/monthly/2024100100/2026090100": "wikimedia.orgpageviews_aggregate_pl.wikipedia.org_all-access_user_monthly_2024100100_2026090100__0aff260a.json",
+  "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/cs.wikipedia.org/all-access/user/P%C5%99eru%C5%A1ovan%C3%BD_p%C5%AFst/monthly/2024100100/2026090100": "wikimedia.orgpageviews_per-article_cs.wikipedia.org_all-access_user_P_C5_99eru_C5_A1ovan_C3_BD_p_C5_AFst_monthly_2024100100_2026090100__1e08999f.json",
+  "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/pl.wikipedia.org/all-access/user/Post/monthly/2024100100/2026090100": "wikimedia.orgpageviews_per-article_pl.wikipedia.org_all-access_user_Post_monthly_2024100100_2026090100__11ba31c1.json",
+  "https://www.wikidata.org/w/api.php?format=json&action=wbgetentities&ids=Q1666254&props=labels%7Cdescriptions%7Csitelinks&languages=cs%7Cen%7Cpl&sitefilter=cswiki%7Cenwiki%7Cplwiki": "wikidataaction__3b2237b9.json",
+  "https://www.wikidata.org/w/api.php?format=json&action=wbsearchentities&search=intermittent+fasting&language=en&type=item&limit=5": "wikidataaction__501d8a44.json"
+}

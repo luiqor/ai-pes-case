@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>$title</title>
+<style>
+  @page { size: Letter; margin: 12mm; }
+  :root { --ink: #1a1a1a; --muted: #666; --rule: #d9d9d9; --accent: #1f4e79; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink); margin: 0; padding: 14mm 12mm;
+    font-size: 10.5pt; line-height: 1.4; max-width: 190mm; margin: 0 auto;
+  }
+  header { border-bottom: 2.5pt solid var(--accent); padding-bottom: 6pt; margin-bottom: 10pt; }
+  h1 { font-size: 17pt; margin: 0 0 3pt; color: var(--accent); line-height: 1.2; }
+  .subtitle { font-size: 9pt; color: var(--muted); }
+  .verdict {
+    background: #f3f7fb; border-left: 3pt solid var(--accent);
+    padding: 8pt 10pt; margin: 0 0 10pt; font-size: 10.5pt;
+  }
+  figure { margin: 0 0 10pt; text-align: center; }
+  figure img { max-width: 100%; height: auto; }
+  figcaption { font-size: 8pt; color: var(--muted); margin-top: 3pt; }
+  table { width: 100%; border-collapse: collapse; font-size: 8.5pt; margin-bottom: 10pt; }
+  th, td { padding: 3.5pt 5pt; text-align: right; border-bottom: 0.5pt solid var(--rule); }
+  th { background: #f0f0f0; font-weight: 600; text-align: right; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  tr:last-child td { border-bottom: 1pt solid var(--accent); }
+  h2 { font-size: 9.5pt; margin: 0 0 4pt; color: var(--accent); text-transform: uppercase;
+       letter-spacing: 0.4pt; }
+  ul { margin: 0; padding-left: 14pt; }
+  li { font-size: 8pt; color: #333; margin-bottom: 2.5pt; }
+  footer { margin-top: 10pt; padding-top: 5pt; border-top: 0.5pt solid var(--rule);
+           font-size: 7.5pt; color: var(--muted); }
+  .gap { color: #a11; font-style: italic; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Audience interest: $topic</h1>
+  <div class="subtitle">$subtitle</div>
+</header>
+
+<div class="verdict">$headline</div>
+
+$chart_block
+
+$table_block
+
+<h2>Assumptions &amp; limitations</h2>
+<ul>
+$limitations
+</ul>
+
+<footer>$footer</footer>
+</body>
+</html>

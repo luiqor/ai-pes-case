@@ -1,0 +1,12 @@
+# IDE
+.vscode/
+
+# Local
+*local*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
