@@ -74,6 +74,7 @@ class StudyManifest(TypedDict):
     granularity: NotRequired[str]
     overrides: NotRequired[dict[str, str]]
     resolution: NotRequired[Resolution | None]
+    report_language: NotRequired[str]
 
 
 # --------------------------------------------------------------------------
@@ -250,8 +251,35 @@ class Comparison(TypedDict):
     fastest_growth: str | None
 
 
+class MessageRef(TypedDict, total=False):
+    """A translatable sentence: a message id plus its parameters.
+
+    Rendered by :class:`i18n.Translator`, which formats the id's template in
+    the requested report language. Three shapes are recognised:
+
+    * ``{"id": ..., "params": {...}}`` -- format one message;
+    * ``{"concat": [ref, ...]}`` -- the parts joined with a space (how the
+      headline appends its optional sentences);
+    * a parameter whose value is a list, or ``{"items": [...], "sep": ...}``,
+      is joined with the named join message (``join.comma`` by default).
+
+    ``params`` values are pre-formatted data (numbers, titles, codes) or
+    nested refs -- the numbers themselves are never re-translated.
+    """
+
+    id: str
+    params: dict[str, Any]
+    concat: list[MessageRef]
+
+
 class AnalysisPayload(TypedDict):
-    """``analysis.json`` -- metrics, rankings, headline, assumptions, caveats."""
+    """``analysis.json`` -- metrics, rankings, headline, assumptions, caveats.
+
+    The ``*_i18n`` siblings are the message refs behind the English strings:
+    ``headline``/``assumptions``/``limitations`` stay the canonical English
+    text (what ``run.py`` prints and what tests assert), while the report and
+    chart render the refs in whatever ``--report-lang`` was requested.
+    """
 
     generated_at: str
     topic: str
@@ -265,6 +293,9 @@ class AnalysisPayload(TypedDict):
     warnings: list[str]
     assumptions: list[str]
     limitations: list[str]
+    headline_i18n: NotRequired[MessageRef]
+    assumptions_i18n: NotRequired[list[MessageRef]]
+    limitations_i18n: NotRequired[list[MessageRef]]
 
 
 # --------------------------------------------------------------------------
@@ -324,6 +355,7 @@ class StudyManifestModel(BaseModel):
     granularity: Literal["monthly"] = "monthly"
     overrides: dict[Annotated[str, Field(pattern=LANG_PATTERN)], str] = {}
     resolution: ResolutionModel | None = None
+    report_language: Annotated[str, Field(pattern=LANG_PATTERN)] | None = None
 
 
 class PageviewPoint(BaseModel):

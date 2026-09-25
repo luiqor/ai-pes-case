@@ -9,6 +9,11 @@ two-page document.
 Charts and typography use fonts shipped with the pinned matplotlib dependency
 (DejaVu), so accented titles such as ``Přerušovaný půst`` render correctly
 without depending on fonts installed on the host system.
+
+Every string the reader sees comes from :mod:`i18n`: pass a ``translator``
+built for the requested report language and the report is rendered in that
+language, with anything untranslated falling back to English *and* saying so
+in a visible note (never silently).
 """
 
 from __future__ import annotations
@@ -21,7 +26,8 @@ import sys
 from pathlib import Path
 
 import common
-from payloads import AnalysisPayload
+import i18n
+from payloads import AnalysisPayload, MessageRef
 from reportlab.lib.colors import Color, HexColor
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
@@ -58,6 +64,20 @@ TABLE_COLUMNS = [
     ("Confidence", 104),
 ]
 ALIGN_LEFT = {"Lang", "Article"}
+
+# Which message carries each column's header. The *keys* stay English (they
+# are also the row keys and the payload vocabulary); only the printed label is
+# translated, so a localised table cannot drift from the data behind it.
+COLUMN_MESSAGES = {
+    "Lang": "report.col_lang",
+    "Article": "report.col_article",
+    "Views": "report.col_views",
+    "Share/M": "report.col_share",
+    "YoY abs": "report.col_yoy_abs",
+    "YoY share": "report.col_yoy_share",
+    "R\u00b2": "report.col_r2",
+    "Confidence": "report.col_confidence",
+}
 
 
 class ReportOverflow(RuntimeError):
@@ -135,38 +155,100 @@ def wrap(text: str, font: str, size: float, max_width: float) -> list[str]:
     return lines
 
 
-def fmt_pct(value: float | None) -> str:
+def fmt_pct(value: float | None, translator: i18n.Translator | None = None) -> str:
     """Format a percentage with an explicit sign, or ``"n/a"`` when undefined."""
-    return "n/a" if value is None else f"{value:+.1f}%"
+    tr = translator or i18n.english()
+    return tr.t("report.na") if value is None else f"{value:+.1f}%"
+
+
+def fit(value: str, font: str, size: float, max_width: float) -> str:
+    """Shorten ``value`` with an ellipsis until it measures within the width.
+
+    Table columns have a fixed layout, so a header translated into a longer
+    word would otherwise collide with its neighbour. English headers already
+    fit, so this changes nothing for them.
+
+    Args:
+        value: Text to draw.
+        font: Registered font name used to measure glyph widths.
+        size: Font size in points.
+        max_width: Available width in points.
+
+    Returns:
+        ``value`` unchanged when it fits, else a truncated form ending in an
+        ellipsis (empty when even that does not fit).
+    """
+    if pdfmetrics.stringWidth(value, font, size) <= max_width:
+        return value
+    trimmed = value
+    while trimmed and (
+        pdfmetrics.stringWidth(trimmed + "\u2026", font, size) > max_width
+    ):
+        trimmed = trimmed[:-1]
+    return f"{trimmed}\u2026" if trimmed else ""
 
 
 # --------------------------------------------------------------------------
 # Shared presentation (HTML and PDF read from the same structures)
 # --------------------------------------------------------------------------
-def subtitle_for(analysis: AnalysisPayload) -> str:
+def headline_for(analysis: AnalysisPayload, translator: i18n.Translator) -> str:
+    """The verdict sentence, in the report language.
+
+    English reads the canonical ``headline`` string (so a hand-edited payload
+    wins), every other language renders ``headline_i18n`` -- the message ref
+    the English string was itself rendered from. A payload that predates the
+    refs falls back to English *and* is counted as untranslated, because a
+    report that silently switches language halfway is worse than a note.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        translator: Target language.
+
+    Returns:
+        The sentence to print.
+    """
+    if translator.is_english:
+        return str(analysis["headline"])
+    ref = analysis.get("headline_i18n")
+    if ref:
+        return translator.render(ref)
+    translator.mark_untranslated("headline_i18n")
+    return str(analysis["headline"])
+
+
+def subtitle_for(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> str:
     """Build the metadata line under the title (languages, window, access)."""
+    tr = translator or i18n.english()
     params = analysis["parameters"]
     window = analysis["window"]
-    return (
-        f"{', '.join(analysis['metrics']) or 'no data'} · "
-        f"{window['since']} to {window['until']} "
-        f"({window.get('months', '?')} months) · "
-        f"access={params['access']}, agent={params['agent']} · "
-        f"generated {analysis['generated_at']}"
+    return tr.t(
+        "report.subtitle",
+        langs=", ".join(analysis["metrics"]) or tr.t("report.no_data"),
+        since=window["since"],
+        until=window["until"],
+        months=window.get("months", "?"),
+        access=params["access"],
+        agent=params["agent"],
+        generated=analysis["generated_at"],
     )
 
 
-def footer_for(analysis: AnalysisPayload) -> str:
+def footer_for(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> str:
     """Build the attribution line: data source, methods, concept id."""
-    return (
-        "Data: Wikimedia Page view analytics (CC0 1.0). "
-        "Methods, thresholds and their rationale: references/methods.md. "
-        f"Topic concept: {analysis.get('qid') or 'unresolved'}. "
-        "Generated by wikipedia-interest-analyzer."
+    tr = translator or i18n.english()
+    return tr.t(
+        "report.footer",
+        qid=str(analysis.get("qid") or tr.t("report.unresolved")),
     )
 
 
-def table_rows_for(analysis: AnalysisPayload) -> list[dict[str, str]]:
+def table_rows_for(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> list[dict[str, str]]:
     """Build the comparison table: one row per measured language, then gaps.
 
     Both renderers consume these rows, so the HTML and PDF tables can never
@@ -175,10 +257,14 @@ def table_rows_for(analysis: AnalysisPayload) -> list[dict[str, str]]:
 
     Args:
         analysis: The ``analysis.json`` payload.
+        translator: Target language; the confidence *labels* are translated,
+            the grade itself (``high``/``medium``/``low``) stays the value
+            stored in ``analysis.json``.
 
     Returns:
         Row dicts keyed by column name plus the ``"gap"`` marker.
     """
+    tr = translator or i18n.english()
     rows: list[dict[str, str]] = []
     for language, metric in analysis["metrics"].items():
         yoy = metric["yoy"]
@@ -189,10 +275,10 @@ def table_rows_for(analysis: AnalysisPayload) -> list[dict[str, str]]:
                 "Article": metric["article_title"],
                 "Views": f"{metric['article_total']:,}",
                 "Share/M": f"{metric['share_ppm']:.2f}",
-                "YoY abs": fmt_pct(yoy.get("article_pct")),
-                "YoY share": fmt_pct(yoy.get("share_pct")),
+                "YoY abs": fmt_pct(yoy.get("article_pct"), tr),
+                "YoY share": fmt_pct(yoy.get("share_pct"), tr),
                 "R\u00b2": f"{metric['trend']['share']['r2']:.2f}",
-                "Confidence": metric["confidence"].upper(),
+                "Confidence": tr.t(f"confidence.{metric['confidence']}").upper(),
             }
         )
     for language in analysis.get("gaps", []):
@@ -200,44 +286,77 @@ def table_rows_for(analysis: AnalysisPayload) -> list[dict[str, str]]:
             {
                 "gap": "gap",
                 "Lang": language,
-                "Article": "no article exists",
+                "Article": tr.t("report.gap_article"),
                 "Views": "\u2014",
                 "Share/M": "\u2014",
                 "YoY abs": "\u2014",
                 "YoY share": "\u2014",
                 "R\u00b2": "\u2014",
-                "Confidence": "not measurable",
+                "Confidence": tr.t("report.gap_confidence"),
             }
         )
     return rows
 
 
-def gaps_note(analysis: AnalysisPayload) -> str:
+def gaps_note(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> str:
     """Inline HTML noting languages with no article (empty string if none)."""
+    tr = translator or i18n.english()
     gaps = analysis.get("gaps", [])
     if not gaps:
         return ""
-    return (
-        f' <span class="gap">No article exists in: {html.escape(", ".join(gaps))} '
-        "&mdash; reported as a coverage gap, never replaced by a substitute.</span>"
+    note = tr.t(
+        "report.gaps_note",
+        langs=tr.t("join.comma").join(gaps),
     )
+    return f' <span class="gap">{html.escape(note)}</span>'
 
 
 # --------------------------------------------------------------------------
 # HTML
 # --------------------------------------------------------------------------
-def caveat_items(analysis: AnalysisPayload) -> list[str]:
+def caveat_items(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> list[str]:
     """Everything the reader must weigh: warnings, then limitations, then assumptions.
 
     Runtime warnings used to reach only ``analysis.json``, so a reader of the
     one-page PDF could not tell that e.g. an unalignable window had capped the
     confidence grade. The report is the shareable artifact; it must carry them.
     Exact duplicates are dropped so repeated wording cannot spend one-page space.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        translator: Target language. English reads the canonical strings from
+            the payload; other languages render the ``*_i18n`` refs they were
+            built from (the warning *prefix* is translated, but a runtime
+            warning's wording comes from the fetch stage and stays English).
+
+    Returns:
+        The caveats, in report order, de-duplicated.
     """
+    tr = translator or i18n.english()
+    if tr.is_english:
+        limitations = list(analysis.get("limitations") or [])
+        assumptions = list(analysis.get("assumptions") or [])
+    else:
+        limitations = _render_caveats(
+            analysis.get("limitations_i18n"),
+            "limitations_i18n",
+            analysis.get("limitations"),
+            tr,
+        )
+        assumptions = _render_caveats(
+            analysis.get("assumptions_i18n"),
+            "assumptions_i18n",
+            analysis.get("assumptions"),
+            tr,
+        )
     ordered = (
-        [f"Warning: {item}" for item in analysis.get("warnings", [])]
-        + list(analysis.get("limitations") or [])
-        + list(analysis.get("assumptions") or [])
+        [tr.t("caveat.warning", item=item) for item in analysis.get("warnings", [])]
+        + limitations
+        + assumptions
     )
     seen: set[str] = set()
     unique: list[str] = []
@@ -246,6 +365,24 @@ def caveat_items(analysis: AnalysisPayload) -> list[str]:
             seen.add(item)
             unique.append(item)
     return unique
+
+
+def _render_caveats(
+    refs: list[MessageRef] | None,
+    ref_key: str,
+    english_texts: list[str] | None,
+    translator: i18n.Translator,
+) -> list[str]:
+    """Render caveat refs in the report language, or admit they are English.
+
+    A payload written before the ``*_i18n`` structures existed has only the
+    English strings: rendering them and *recording* them means the report's
+    note still tells the truth about what is untranslated.
+    """
+    if refs:
+        return [translator.render(ref) for ref in refs]
+    translator.mark_untranslated(ref_key)
+    return list(english_texts or [])
 
 
 def _table_cell(name: str, row: dict[str, str]) -> str:
@@ -257,7 +394,10 @@ def _table_cell(name: str, row: dict[str, str]) -> str:
 
 
 def render_html(
-    analysis: AnalysisPayload, chart_png: Path | None, out_path: Path
+    analysis: AnalysisPayload,
+    chart_png: Path | None,
+    out_path: Path,
+    translator: i18n.Translator | None = None,
 ) -> None:
     """Write the self-contained HTML report (chart embedded as base64).
 
@@ -266,30 +406,36 @@ def render_html(
         chart_png: Chart to embed; a missing/absent file degrades to a
             placeholder note rather than breaking the report.
         out_path: Output file; parent directories are created.
+        translator: Target language; English when omitted.
 
     Raises:
         OSError: If the template or output cannot be read/written.
         KeyError: If a placeholder's section is missing from the payload.
     """
+    tr = translator or i18n.english()
     template = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8"))
 
     if chart_png and chart_png.is_file():
         encoded = base64.b64encode(chart_png.read_bytes()).decode("ascii")
         chart_block = (
-            '<figure><img alt="Pageview comparison chart" '
+            f'<figure><img alt="{html.escape(tr.t("report.chart_alt"))}" '
             f'src="data:image/png;base64,{encoded}"/>'
-            "<figcaption>Absolute monthly pageviews (top) and normalised share of "
-            "all wiki pageviews (bottom).</figcaption></figure>"
+            f"<figcaption>{html.escape(tr.t('report.chart_caption'))}"
+            "</figcaption></figure>"
         )
     else:
         chart_block = (
-            '<figure class="gap">Chart unavailable (no series to plot).</figure>'
+            f'<figure class="gap">{html.escape(tr.t("report.chart_missing"))}'
+            "</figure>"
         )
 
-    header_cells = "".join(f"<th>{html.escape(name)}</th>" for name, _ in TABLE_COLUMNS)
+    header_cells = "".join(
+        f"<th>{html.escape(tr.t(COLUMN_MESSAGES[name]))}</th>"
+        for name, _ in TABLE_COLUMNS
+    )
     body_rows = [
         "<tr>" + "".join(_table_cell(name, row) for name, _ in TABLE_COLUMNS) + "</tr>"
-        for row in table_rows_for(analysis)
+        for row in table_rows_for(analysis, tr)
     ]
 
     table_block = (
@@ -301,18 +447,37 @@ def render_html(
     )
 
     bullets = "".join(
-        f"<li>{html.escape(item)}</li>" for item in caveat_items(analysis)
+        f"<li>{html.escape(item)}</li>" for item in caveat_items(analysis, tr)
+    )
+
+    # Everything the reader sees is rendered first: the note counts the
+    # strings that fell back to English, so it is only accurate afterwards.
+    title = tr.t("report.title", topic=str(analysis["topic"]))
+    subtitle = subtitle_for(analysis, tr)
+    heading = tr.t("report.assumptions_heading")
+    footer = footer_for(analysis, tr)
+    headline = headline_for(analysis, tr)
+    gap_note = gaps_note(analysis, tr)
+    note = tr.note()
+    note_block = (
+        f'<p class="gap"><strong>Warning</strong> ({html.escape(tr.lang)}): '
+        f"{html.escape(note)}</p>"
+        if note
+        else ""
     )
 
     rendered = template.substitute(
-        title=html.escape(f"Audience interest: {analysis['topic']}"),
-        topic=html.escape(str(analysis["topic"])),
-        subtitle=html.escape(subtitle_for(analysis)),
-        headline=html.escape(analysis["headline"]) + gaps_note(analysis),
+        html_lang=html.escape(tr.display_lang),
+        title=html.escape(title),
+        h1=html.escape(title),
+        subtitle=html.escape(subtitle),
+        headline=html.escape(headline) + gap_note,
         chart_block=chart_block,
         table_block=table_block,
+        heading=html.escape(heading),
         limitations=bullets,
-        footer=html.escape(footer_for(analysis)),
+        note_block=note_block,
+        footer=html.escape(footer),
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(rendered, encoding="utf-8")
@@ -386,7 +551,10 @@ class _Sheet:
 
 
 def render_pdf(
-    analysis: AnalysisPayload, chart_png: Path | None, out_path: Path
+    analysis: AnalysisPayload,
+    chart_png: Path | None,
+    out_path: Path,
+    translator: i18n.Translator | None = None,
 ) -> None:
     """Write the strictly-one-page PDF, or raise ``ReportOverflow``.
 
@@ -398,24 +566,23 @@ def render_pdf(
         analysis: The ``analysis.json`` payload.
         chart_png: Chart to draw scaled; ignored when missing/unreadable.
         out_path: Output file; the caller decides what to do on failure.
+        translator: Target language; English when omitted.
 
     Raises:
         ReportOverflow: When any block would cross the bottom margin.
     """
+    tr = translator or i18n.english()
     writer = pdf_canvas.Canvas(str(out_path), pagesize=letter)
-    writer.setTitle(f"Audience interest: {analysis['topic']}")
+    title = tr.t("report.title", topic=str(analysis["topic"]))
+    writer.setTitle(title)
     writer.setAuthor("wikipedia-interest-analyzer")
     sheet = _Sheet(writer)
 
     # --- header ------------------------------------------------------------
+    sheet.text(title, FONT_BOLD, 17, 21, what="report title")
     sheet.text(
-        f"Audience interest: {analysis['topic']}",
-        FONT_BOLD,
-        17,
-        21,
-        what="report title",
+        subtitle_for(analysis, tr), FONT, 8, 11, color=MUTED, what="subtitle"
     )
-    sheet.text(subtitle_for(analysis), FONT, 8, 11, color=MUTED, what="subtitle")
     sheet.gap(3)
     writer.setStrokeColor(ACCENT)
     writer.setLineWidth(2.2)
@@ -423,11 +590,10 @@ def render_pdf(
     sheet.gap(10)
 
     # --- verdict -----------------------------------------------------------
-    verdict = analysis["headline"] + (
-        " No article exists in: " + ", ".join(analysis["gaps"]) + " -- not measurable."
-        if analysis.get("gaps")
-        else ""
-    )
+    # ``headline`` already ends with the coverage-gap sentence when there are
+    # gaps (analyze.py appends it), so the PDF prints it exactly once -- the
+    # old second copy cost one-page space and read as a stutter.
+    verdict = headline_for(analysis, tr)
     verdict_lines = wrap(verdict, FONT, 9.5, CONTENT_W - 22)
     box_height = 12.5 * len(verdict_lines) + 16
     sheet.need(box_height + 10, "verdict box")
@@ -461,8 +627,7 @@ def render_pdf(
         )
         sheet.gap(4)
         sheet.text(
-            "Figure: absolute monthly pageviews (top) and normalised share of all "
-            "wiki pageviews (bottom).",
+            tr.t("report.figure_caption"),
             FONT,
             7.5,
             10,
@@ -472,7 +637,7 @@ def render_pdf(
         sheet.gap(4)
 
     # --- table -------------------------------------------------------------
-    rows = table_rows_for(analysis)
+    rows = table_rows_for(analysis, tr)
     row_height = 12.5
     sheet.need(16 + row_height * len(rows) + 8, "comparison table")
 
@@ -488,7 +653,9 @@ def render_pdf(
     writer.setFont(FONT_BOLD, 7.8)
     writer.setFillColor(INK)
     for (name, width), x in zip(TABLE_COLUMNS, x_positions, strict=True):
-        value = name
+        # A translated header can be longer than its fixed column: shorten it
+        # rather than let it collide with the neighbour it shares a row with.
+        value = fit(tr.t(COLUMN_MESSAGES[name]), FONT_BOLD, 7.8, width - 8)
         if name in ALIGN_LEFT:
             writer.drawString(x + 4, header_top - 11.5, value)
         else:
@@ -513,14 +680,14 @@ def render_pdf(
 
     # --- assumptions & limitations ----------------------------------------
     sheet.text(
-        "ASSUMPTIONS & LIMITATIONS",
+        tr.t("report.assumptions_heading").upper(),
         FONT_BOLD,
         8.5,
         12,
         color=ACCENT,
         what="limitations heading",
     )
-    for item in caveat_items(analysis):
+    for item in caveat_items(analysis, tr):
         sheet.text(
             "\u2022  " + item,
             FONT,
@@ -531,13 +698,31 @@ def render_pdf(
             what="limitations bullet",
         )
 
+    # --- untranslated strings ---------------------------------------------
+    # Rendered last, so its count is accurate; red so a half-English report
+    # cannot be mistaken for a finished translation.
+    note = tr.note()
+    if note:
+        sheet.text(
+            "\u2022  " + note,
+            FONT,
+            7.2,
+            9.4,
+            indent=10,
+            max_width=CONTENT_W,
+            color=HexColor("#a11111"),
+            what="untranslated note",
+        )
+
     # --- footer ------------------------------------------------------------
     sheet.gap(6)
     writer.setStrokeColor(RULE)
     writer.setLineWidth(0.5)
     writer.line(MARGIN, sheet.y, PAGE_W - MARGIN, sheet.y)
     sheet.gap(0)
-    sheet.text(footer_for(analysis), FONT, 6.8, 8.5, color=MUTED, what="footer")
+    sheet.text(
+        footer_for(analysis, tr), FONT, 6.8, 8.5, color=MUTED, what="footer"
+    )
 
     writer.showPage()
     writer.save()
@@ -552,11 +737,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chart", default="chart.png", help="chart PNG from chart.py")
     parser.add_argument("--html", default="report.html", help="HTML output path")
     parser.add_argument("--pdf", default="report.pdf", help="PDF output path")
+    parser.add_argument(
+        "--report-lang",
+        default="",
+        help="report language code (default: English), e.g. pl",
+    )
+    parser.add_argument(
+        "--translations",
+        default="",
+        help="translations JSON (default: translations.<lang>.json)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Write the HTML report always, and the one-page PDF when it fits.
+    """Write the HTML report always, and the one-page PDF when it fits one page.
 
     Returns:
         ``0`` on success; ``1`` when the PDF overflowed (the HTML is still
@@ -567,14 +762,20 @@ def main(argv: list[str] | None = None) -> int:
     analysis = common.read_json(args.analysis)
     chart = Path(args.chart) if args.chart else None
 
+    lang = i18n.normalize_lang(args.report_lang)
+    fallback = Path(f"translations.{lang}.json")
+    translations = Path(args.translations) if args.translations else fallback
+    translator = i18n.translator_for(lang, translations)
+
     html_path = Path(args.html)
-    render_html(analysis, chart, html_path)
+    render_html(analysis, chart, html_path, translator)
     print(f"wrote {html_path}")
 
+    status = 0
     pdf_path = Path(args.pdf)
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        render_pdf(analysis, chart, pdf_path)
+        render_pdf(analysis, chart, pdf_path, translator)
     except ReportOverflow as exc:
         print(f"error: {exc}", file=sys.stderr)
         print(
@@ -583,9 +784,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         if pdf_path.exists():
             pdf_path.unlink()
-        return 1
-    print(f"wrote {pdf_path} (1 page)")
-    return 0
+        status = 1
+    else:
+        print(f"wrote {pdf_path} (1 page)")
+
+    # Printed on both paths: an untranslated report must be flagged even when
+    # the PDF failed for an unrelated reason.
+    i18n.warn_untranslated(translator)
+    return status
 
 
 if __name__ == "__main__":

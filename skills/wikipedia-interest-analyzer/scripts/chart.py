@@ -9,6 +9,11 @@ Two stacked panels, because the two metrics answer different questions:
 
 Output is deterministic: fixed figure size, fixed dpi, no randomness, and the
 non-interactive ``Agg`` backend so it also works over SSH or in CI.
+
+Panel titles, axis labels and the gap note come from :mod:`i18n`, so passing a
+``translator`` renders the chart's own words in the report language (the
+plotted data -- series values, article titles, month labels -- is never
+translated).
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import common  # noqa: E402
+import i18n  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402  (backend must be set first)
 from payloads import AnalysisPayload  # noqa: E402
 
@@ -37,13 +43,19 @@ def _tick_indices(count: int, max_ticks: int = 9) -> list[int]:
     return list(range(0, count, step))
 
 
-def render(analysis: AnalysisPayload, out_prefix: Path) -> dict[str, str]:
+def render(
+    analysis: AnalysisPayload,
+    out_prefix: Path,
+    translator: i18n.Translator | None = None,
+) -> dict[str, str]:
     """Write ``<prefix>.png`` and ``<prefix>.svg``.
 
     Args:
         analysis: ``analysis.json`` content; languages without a series
             (coverage gaps) are skipped, and a fully empty set is an error.
         out_prefix: Output path without extension; parents are created.
+        translator: Target language for the chart's own labels; English when
+            omitted.
 
     Returns:
         ``{"png": <path>, "svg": <path>}``.
@@ -52,6 +64,7 @@ def render(analysis: AnalysisPayload, out_prefix: Path) -> dict[str, str]:
         SystemExit: When every requested language is a coverage gap, so
             there is nothing honest to plot.
     """
+    tr = translator or i18n.english()
     metrics = analysis["metrics"]
     languages = [
         lang for lang, m in metrics.items() if m.get("series") and m["series"]["labels"]
@@ -69,7 +82,11 @@ def render(analysis: AnalysisPayload, out_prefix: Path) -> dict[str, str]:
         labels = series["labels"]
         x = list(range(len(labels)))
         colour = COLOURS[index % len(COLOURS)]
-        name = f"{language}: {metrics[language]['article_title']}"
+        name = tr.t(
+            "chart.legend_entry",
+            lang=language,
+            title=metrics[language]["article_title"],
+        )
 
         ax_views.plot(
             x,
@@ -90,24 +107,29 @@ def render(analysis: AnalysisPayload, out_prefix: Path) -> dict[str, str]:
             label=name,
         )
 
-    ax_views.set_ylabel("views / month")
-    ax_views.set_title("Absolute monthly pageviews")
-    ax_share.set_ylabel("per million project views")
-    ax_share.set_title("Normalised share of all wiki pageviews")
-    ax_share.set_xlabel("month")
+    ax_views.set_ylabel(tr.t("chart.views_ylabel"))
+    ax_views.set_title(tr.t("chart.views_title"))
+    ax_share.set_ylabel(tr.t("chart.share_ylabel"))
+    ax_share.set_title(tr.t("chart.share_title"))
+    ax_share.set_xlabel(tr.t("chart.xlabel"))
 
     window = analysis["window"]
     months = window.get("months", len(metrics[languages[0]]["series"]["labels"]))
     fig.suptitle(
-        f"{analysis['topic']}  ({window['since']} .. {window['until']}, "
-        f"{months} months)",
+        tr.t(
+            "chart.suptitle",
+            topic=analysis["topic"],
+            since=window["since"],
+            until=window["until"],
+            months=months,
+        ),
         fontsize=12,
     )
     if analysis.get("gaps"):
         fig.text(
             0.5,
             0.005,
-            "no article in: " + ", ".join(analysis["gaps"]),
+            tr.t("chart.gaps_note", langs=tr.t("join.comma").join(analysis["gaps"])),
             ha="center",
             fontsize=8,
             style="italic",
@@ -145,6 +167,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out", default="chart", help="output path prefix (no extension)"
     )
+    parser.add_argument(
+        "--report-lang",
+        default="",
+        help="language for the chart's labels (default: English), e.g. pl",
+    )
+    parser.add_argument(
+        "--translations",
+        default="",
+        help="translations JSON (default: translations.<lang>.json)",
+    )
     return parser
 
 
@@ -153,9 +185,14 @@ def main(argv: list[str] | None = None) -> int:
     common.configure_console()
     args = build_parser().parse_args(argv)
     analysis = common.read_json(args.analysis)
-    paths = render(analysis, Path(args.out))
+    lang = i18n.normalize_lang(args.report_lang)
+    fallback = Path(f"translations.{lang}.json")
+    translations = Path(args.translations) if args.translations else fallback
+    translator = i18n.translator_for(lang, translations)
+    paths = render(analysis, Path(args.out), translator)
     for path in paths.values():
         print(f"wrote {path}")
+    i18n.warn_untranslated(translator)
     return 0
 
 

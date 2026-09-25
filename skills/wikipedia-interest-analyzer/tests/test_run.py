@@ -12,8 +12,10 @@ import re
 from pathlib import Path
 
 import common
+import i18n
 import pytest
 import run as run_mod
+from helpers import full_translation
 
 ARTIFACTS = (
     "series.json",
@@ -230,7 +232,10 @@ def test_messages_never_reference_a_subcommand_that_does_not_exist():
     "run 'run.py fetch' first" pointing at a subcommand that was never defined.
     """
     source = Path(run_mod.__file__).read_text(encoding="utf-8")
-    referenced = set(re.findall(r"run\.py ([a-z][a-z-]*)", source))
+    # Digits are part of a subcommand name too (`i18n-template`), so the
+    # pattern must accept them -- otherwise it would flag the very command
+    # that writes the translations file as "non-existent".
+    referenced = set(re.findall(r"run\.py ([a-z][a-z0-9-]*)", source))
     missing = referenced - set(run_mod.SUBCOMMANDS)
     assert not missing, (
         f"messages reference non-existent subcommands: {sorted(missing)}"
@@ -454,3 +459,140 @@ def test_init_rejects_a_malformed_month_flag_as_a_usage_error(tmp_path, capsys):
     assert excinfo.value.code == 2
     assert "YYYY-MM" in capsys.readouterr().err
     assert not Path(path).exists()
+
+
+# --- report language (i18n) ---------------------------------------------------
+def test_init_stores_and_normalises_the_report_language(tmp_path):
+    """The language is a *study* setting: stored once, reused on every rerun."""
+    path = str(tmp_path / "study.json")
+    assert (
+        run_mod.main(
+            [*GOLDEN_INIT_ARGS, "--study", path, "--report-lang", " PL "]
+        )
+        == 0
+    )
+
+    assert common.read_json(path)["report_language"] == "pl"
+
+
+def test_i18n_template_writes_the_reference_then_refuses_to_clobber(
+    tmp_path, capsys
+):
+    out = tmp_path / "translations.pl.json"
+
+    assert run_mod.main(["i18n-template", "--lang", "pl", "--out", str(out)]) == 0
+    reference = common.read_json(out)
+    assert reference["lang"] == "pl"
+    assert set(reference["messages"]) == set(i18n.MESSAGES)
+    # The file must teach the agent what to do with it, not just dump strings.
+    assert "keep" in reference["_instructions"].lower()
+
+    capsys.readouterr()
+    # main() turns the refusal into a visible exit code, not an exception.
+    assert (
+        run_mod.main(["i18n-template", "--lang", "pl", "--out", str(out)]) == 1
+    )
+    assert "--force" in capsys.readouterr().err
+    # Refusing must not damage the existing (possibly finished) translation.
+    assert common.read_json(out) == reference
+
+    assert (
+        run_mod.main(
+            ["i18n-template", "--lang", "pl", "--out", str(out), "--force"]
+        )
+        == 0
+    )
+
+
+def test_a_first_localised_run_writes_the_reference_and_says_so(tmp_path, capsys):
+    """No translations yet: fall back to English *and* leave the file to edit."""
+    path = _init(tmp_path)
+    out = tmp_path / "out"
+    capsys.readouterr()
+
+    assert (
+        run_mod.main(
+            ["all", "--study", path, "--out", str(out), "--report-lang", "pl"]
+        )
+        == 0
+    )
+    err = capsys.readouterr().err
+
+    # The reference lands where the rerun will look for it.
+    assert (out / "translations.pl.json").is_file()
+    assert "wrote the English reference file" in err
+    # The report still renders -- in English, and it admits that.
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert "<html lang=\"en\">" in html
+    assert "Untranslated text:" in html
+
+
+def test_a_translated_rerun_localises_the_report_and_the_chart(tmp_path, capsys):
+    """The whole point: edit the reference, rerun, get a localised output."""
+    path = _init(tmp_path)
+    out = tmp_path / "out"
+    assert (
+        run_mod.main(["all", "--study", path, "--out", str(out), "--report-lang", "xx"])
+        == 0
+    )
+    reference = common.read_json(out / "translations.xx.json")
+    reference["messages"] = full_translation("xx")
+    common.write_json(out / "translations.xx.json", reference)
+    capsys.readouterr()
+
+    assert (
+        run_mod.main(["all", "--study", path, "--out", str(out), "--report-lang", "xx"])
+        == 0
+    )
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert '<html lang="xx">' in html
+    assert "[xx] Audience interest: intermittent fasting" in html
+    assert "Untranslated text:" not in html, "a complete translation shows no note"
+    assert "no 'xx' translation" not in capsys.readouterr().err
+
+    # The chart is report-facing text too, so it moves with the same language.
+    svg = (out / "chart.svg").read_text(encoding="utf-8")
+    assert "[xx] Absolute monthly pageviews" in svg
+
+
+def test_the_manifest_report_language_applies_without_the_flag(tmp_path):
+    """A rerun months later must not need the flag repeated."""
+    path = str(tmp_path / "study.json")
+    assert (
+        run_mod.main(
+            [*GOLDEN_INIT_ARGS, "--study", path, "--report-lang", "xx"]
+        )
+        == 0
+    )
+    out = tmp_path / "out"
+    assert run_mod.main(["all", "--study", path, "--out", str(out)]) == 0
+    # The first run left the reference where the manifest's language points.
+    reference = out / "translations.xx.json"
+    assert reference.is_file()
+
+    payload = common.read_json(reference)
+    payload["messages"] = full_translation("xx")
+    common.write_json(reference, payload)
+    assert run_mod.main(["all", "--study", path, "--out", str(out)]) == 0
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert '<html lang="xx">' in html
+    assert "[xx] Audience interest: intermittent fasting" in html
+
+
+def test_a_corrupt_translations_file_stops_the_run(tmp_path, capsys):
+    """Silently rendering English instead of the requested language is worse."""
+    path = _init(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "translations.pl.json").write_text("{not json", encoding="utf-8")
+
+    assert (
+        run_mod.main(
+            ["all", "--stage", "report", "--study", path, "--out", str(out),
+             "--report-lang", "pl"]
+        )
+        == 1
+    )
+    assert "cannot read translations" in capsys.readouterr().err

@@ -24,12 +24,14 @@ import argparse
 from datetime import date
 
 import common
+import i18n
 import pandas as pd
 from payloads import (
     AnalysisPayload,
     Comparison,
     LanguageMetrics,
     LanguageSeries,
+    MessageRef,
     SeasonalityProfile,
     SeriesPayload,
     TrendFit,
@@ -432,8 +434,8 @@ def build_headline(
     window: WindowRange,
     metrics: dict[str, LanguageMetrics],
     gaps: list[str],
-) -> str:
-    """Write the one-sentence verdict: growth per language plus every grade.
+) -> MessageRef:
+    """Compose the one-sentence verdict as a translatable message ref.
 
     Args:
         topic: The study topic, quoted into the sentence.
@@ -442,48 +444,107 @@ def build_headline(
         gaps: Languages with no article at all (appended as unmeasurable).
 
     Returns:
-        A single self-contained sentence; the report prints it verbatim.
+        A :class:`payloads.MessageRef`. Its English rendering
+        (``i18n.english().render(ref)``) is what goes into ``analysis.json``
+        as ``headline``; the report renders the same ref in the requested
+        report language, so the two cannot disagree.
     """
     span = f"{window['since']}..{window['until']}"
     ranked = _rank_by_growth(metrics)
     if not ranked:
-        return (
-            f"No language edition has enough data to assess interest "
-            f"in {topic!r} over {span}."
-        )
+        return {
+            "id": "headline.none",
+            "params": {"topic": repr(topic), "span": span},
+        }
 
-    parts = []
+    parts: list[MessageRef] = []
     for lang, m in ranked:
         share_pct = m["yoy"]["share_pct"]
         article_pct = m["yoy"]["article_pct"]
-        parts.append(
-            f"{lang} {share_pct:+.1f}% share ({article_pct:+.1f}% absolute)"
-            if share_pct is not None and article_pct is not None
-            else f"{lang} n/a"
-        )
-    grades = ", ".join(f"{lang} {m['confidence']}" for lang, m in ranked)
-    sentence = (
-        f"Normalised interest in {topic!r} over {span} (second half vs first half): "
-        + "; ".join(parts)
-        + f". Confidence: {grades}."
-    )
-    substituted = [
-        f"{lang} uses '{m['article_title']}' (no native article exists)"
+        if share_pct is not None and article_pct is not None:
+            parts.append(
+                {
+                    "id": "headline.part",
+                    "params": {
+                        "lang": lang,
+                        "share_pct": f"{share_pct:+.1f}%",
+                        "article_pct": f"{article_pct:+.1f}%",
+                    },
+                }
+            )
+        else:
+            parts.append({"id": "headline.part_na", "params": {"lang": lang}})
+    grades: list[MessageRef] = [
+        {
+            "id": "headline.grade",
+            "params": {
+                "lang": lang,
+                # The grade is a data value in analysis.json ("medium"); the
+                # message ref is what lets the report show it in report words.
+                "confidence": {"id": f"confidence.{m['confidence']}"},
+            },
+        }
+        for lang, m in ranked
+    ]
+    main: MessageRef = {
+        "id": "headline.main",
+        "params": {
+            "topic": repr(topic),
+            "span": span,
+            "parts": {"items": parts, "sep": "join.semicolon"},
+            "grades": {"items": grades, "sep": "join.comma"},
+        },
+    }
+
+    substituted: list[MessageRef] = [
+        {
+            "id": "headline.substitute",
+            "params": {"lang": lang, "title": m["article_title"]},
+        }
         for lang, m in metrics.items()
         if m.get("resolved_via") == "override" and m.get("native_gap")
     ]
+    if not substituted and not gaps:
+        return main
+
+    # Optional sentences are appended with a space, so the English headline
+    # stays byte-for-byte what the rule above composes.
+    sentences: list[MessageRef] = [main]
     if substituted:
-        sentence += " Substitute in use: " + "; ".join(substituted) + "."
+        sentences.append(
+            {
+                "id": "headline.substitutes",
+                "params": {"items": {"items": substituted, "sep": "join.semicolon"}},
+            }
+        )
     if gaps:
-        sentence += f" No article exists in: {', '.join(gaps)} -- not measurable."
-    return sentence
+        sentences.append(
+            {
+                "id": "headline.gaps",
+                "params": {"langs": {"items": gaps, "sep": "join.comma"}},
+            }
+        )
+    return {"concat": sentences}
+
+
+def build_assumptions() -> list[MessageRef]:
+    """The two standing assumptions, as refs (fixed order, always present).
+
+    NOTE: the growth definition lives in ``build_limitations`` (with its
+    references/methods.md pointer), not here -- stating it twice made the
+    report print the same bullet twice and cost one-page space.
+    """
+    return [
+        {"id": "assumption.share"},
+        {"id": "assumption.thresholds"},
+    ]
 
 
 def build_limitations(
     payload: SeriesPayload,
     metrics: dict[str, LanguageMetrics],
     gaps: list[str],
-) -> list[str]:
+) -> list[MessageRef]:
     """Assemble every caveat the reader must weigh, in report order.
 
     Covers what pageviews cannot say, the single-article proxy, the request
@@ -496,57 +557,74 @@ def build_limitations(
         gaps: Languages with no article for this topic.
 
     Returns:
-        Limitations, most important first; the report de-duplicates them
-        against warnings and assumptions.
+        Limitations as message refs, most important first; the report renders
+        them in the report language and de-duplicates them against warnings
+        and assumptions after rendering.
     """
     parameters = payload["parameters"]
-    limitations = [
-        "Pageviews measure article reads, not willingness to pay -- treat this as "
-        "a direction indicator, not a market size.",
-        "Interest is proxied by one article per language edition; how much of the "
-        "topic each article covers can differ between editions.",
-        f"Requests used access={parameters['access']}, "
-        f"agent={parameters['agent']} (bots excluded); Wikimedia rate "
-        "limits were not probed, so requests are sequential with a fixed delay.",
-        "Growth compares the second half of the window with the first half "
-        "(design choice; see references/methods.md).",
+    limitations: list[MessageRef] = [
+        {"id": "limitation.pageviews"},
+        {"id": "limitation.proxy"},
+        {
+            "id": "limitation.requests",
+            "params": {
+                "access": parameters["access"],
+                "agent": parameters["agent"],
+            },
+        },
+        {"id": "limitation.growth"},
     ]
     if gaps:
         limitations.insert(
             0,
-            f"No Wikipedia article exists for this topic in: {', '.join(gaps)}. "
-            "Coverage gaps are reported, never filled with a substitute article.",
+            {
+                "id": "limitation.gaps",
+                "params": {"langs": {"items": gaps, "sep": "join.comma"}},
+            },
         )
-    substituted = [
-        f"{language} = '{item['article_title']}' ("
-        + (
-            "no native article exists for this topic"
-            if item.get("native_gap")
-            else "chosen explicitly"
-        )
-        + ")"
+    substituted: list[MessageRef] = [
+        {
+            "id": "limitation.substitute_item",
+            "params": {
+                "lang": language,
+                "title": item["article_title"],
+                "reason": {
+                    "id": (
+                        "limitation.reason_native"
+                        if item.get("native_gap")
+                        else "limitation.reason_chosen"
+                    )
+                },
+            },
+        }
         for language, item in payload["series"].items()
         if item.get("resolved_via") == "override"
     ]
     if substituted:
         limitations.append(
-            "Manual substitution in effect: "
-            + "; ".join(substituted)
-            + ". A substitute may cover a broader or different scope than the "
-            "topic, so cross-language comparisons involving it are not "
-            "like-for-like."
+            {
+                "id": "limitation.substitutes",
+                "params": {"items": {"items": substituted, "sep": "join.semicolon"}},
+            }
         )
-    seasonal = [
-        f"{lang} peaks in calendar month {m['seasonality']['peak_month']} "
-        f"({m['seasonality']['peak_ratio']}x the overall mean)"
+    seasonal: list[MessageRef] = [
+        {
+            "id": "limitation.seasonal_item",
+            "params": {
+                "lang": lang,
+                "month": m["seasonality"]["peak_month"],
+                "ratio": m["seasonality"]["peak_ratio"],
+            },
+        }
         for lang, m in metrics.items()
         if m["flags"].get("seasonality_observed")
     ]
     if seasonal:
         limitations.append(
-            "Seasonal signal detected -- "
-            + "; ".join(seasonal)
-            + ". A single seasonal cycle can dominate a short window."
+            {
+                "id": "limitation.seasonal",
+                "params": {"items": {"items": seasonal, "sep": "join.semicolon"}},
+            }
         )
     return limitations
 
@@ -605,27 +683,30 @@ def analyze(payload: SeriesPayload) -> AnalysisPayload:
         "fastest_growth": growth_ranked[0][0] if growth_ranked else None,
     }
 
+    # One composition, two consumers: the English strings below are the
+    # *rendering of* the refs stored beside them, so a report in any other
+    # language says exactly what analysis.json says -- only in other words.
+    english = i18n.english()
+    headline_ref = build_headline(payload["topic"], payload["window"], metrics, gaps)
+    assumption_refs = build_assumptions()
+    limitation_refs = build_limitations(payload, metrics, gaps)
+
     return {
         "generated_at": payload.get("generated_at") or date.today().isoformat(),
         "topic": payload["topic"],
         "qid": payload.get("qid"),
         "window": payload["window"],
         "parameters": payload["parameters"],
-        "headline": build_headline(payload["topic"], payload["window"], metrics, gaps),
+        "headline": english.render(headline_ref),
+        "headline_i18n": headline_ref,
         "metrics": metrics,
         "comparison": comparison,
         "gaps": gaps,
         "warnings": warnings,
-        "assumptions": [
-            # NOTE: the growth definition lives in `limitations` (with its
-            # references/methods.md pointer), not here -- stating it twice made
-            # the report print the same bullet twice and cost one-page space.
-            "Share = article views / total project views x 1e6; growth counts only "
-            "when absolute and normalised direction agree.",
-            "Confidence thresholds (R2 0.6/0.4, seasonality 2x, 24 months, 50 "
-            "views/month) are design parameters, tuned on recorded fixtures.",
-        ],
-        "limitations": build_limitations(payload, metrics, gaps),
+        "assumptions": [english.render(ref) for ref in assumption_refs],
+        "assumptions_i18n": assumption_refs,
+        "limitations": [english.render(ref) for ref in limitation_refs],
+        "limitations_i18n": limitation_refs,
     }
 
 

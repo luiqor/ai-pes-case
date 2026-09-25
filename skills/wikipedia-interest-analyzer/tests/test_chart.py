@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import analyze as analyze_mod
 import chart as chart_mod
+import i18n
 import pytest
+from helpers import full_translation
 
 
 def test_renders_png_and_svg(golden_analysis, tmp_path):
@@ -49,3 +51,28 @@ def test_all_gaps_refuses_to_render(make_series, tmp_path):
     with pytest.raises(SystemExit) as excinfo:
         chart_mod.render(analysis, tmp_path / "chart")
     assert "coverage gap" in str(excinfo.value)
+
+
+# ------------------------------------------------------- report language -----
+def test_chart_labels_follow_the_report_language(golden_analysis, tmp_path):
+    """The chart's own words are report text too, not just the PDF's."""
+    translator = i18n.Translator("xx", full_translation("xx"))
+
+    chart_mod.render(golden_analysis, tmp_path / "chart", translator)
+    svg = (tmp_path / "chart.svg").read_text(encoding="utf-8")
+
+    assert "[xx] Absolute monthly pageviews" in svg
+    assert "[xx] views / month" in svg
+    assert "[xx] month" in svg
+    # Plotted data is never translated: titles and window labels stay literal.
+    assert "Přerušovaný" in svg
+
+
+def test_english_chart_is_unchanged_by_the_translator_default(
+    golden_analysis, tmp_path
+):
+    chart_mod.render(golden_analysis, tmp_path / "chart")
+    svg = (tmp_path / "chart.svg").read_text(encoding="utf-8")
+
+    assert "views / month" in svg
+    assert "no article in" in svg or "pl" in svg

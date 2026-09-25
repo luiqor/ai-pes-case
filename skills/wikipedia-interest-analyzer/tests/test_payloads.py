@@ -102,6 +102,24 @@ def test_version_must_stay_an_int(study_factory):
     assert "version" in str(excinfo.value)
 
 
+def test_report_language_is_optional_but_must_be_a_real_code(study_factory):
+    """The field is opt-in (English by default) and follows the code pattern.
+
+    It reaches the manifest from ``init --report-lang``, so a hand-edited
+    ``study.json`` must be validated here rather than at render time.
+    """
+    study = study_factory()
+    assert payloads.validate_study(study, "manifest.json") is study
+
+    study["report_language"] = "pl"
+    assert payloads.validate_study(study, "manifest.json")["report_language"] == "pl"
+
+    study["report_language"] = "PL!"  # not a BCP-47-ish code this skill accepts
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "manifest.json")
+    assert "report_language" in str(excinfo.value)
+
+
 def test_validate_study_accepts_a_resolved_manifest(resolve_study):
     """The shape resolve.py writes must satisfy the boundary it is saved to."""
     study: dict[str, Any] = resolve_study()

@@ -11,6 +11,14 @@ nothing.
     run.py all --out reports/           # resolve -> fetch -> analyze -> chart -> report
     run.py override --lang pl --title "Post"   # deliberate substitution
     run.py all --out reports/           # rerun; cached responses are reused
+    run.py i18n-template --lang pl      # write the message reference to translate
+
+The report and the chart are written in the report language: pass
+``--report-lang <code>`` (or set it once with ``init``) and the wording comes
+from ``translations.<lang>.json`` beside the results; the English message
+reference file is written there automatically when it is missing, so nothing
+is ever machine-invented. Data, ``analysis.json`` and the console stay
+English either way.
 
 Outputs (study.json is the manifest; series.json, analysis.json, chart.*,
 report.* are results) go to --study / --out, defaulting to the current
@@ -30,6 +38,7 @@ import chart as chart_mod
 import common
 import fetch as fetch_mod
 import http_client
+import i18n
 import report as report_mod
 import resolve as resolve_mod
 from payloads import (
@@ -45,7 +54,15 @@ STAGES = ("resolve", "fetch", "analyze", "chart", "report")
 # Subcommands understood by the argument parser. Anything else given first is
 # treated as arguments to `all`, so `run.py --out reports/` works as users
 # expect instead of failing with "unrecognized arguments".
-SUBCOMMANDS = {"init", "all", "resolve", "status", "override", "clear-cache"}
+SUBCOMMANDS = {
+    "init",
+    "all",
+    "resolve",
+    "status",
+    "override",
+    "i18n-template",
+    "clear-cache",
+}
 
 
 # --------------------------------------------------------------------------
@@ -119,6 +136,10 @@ def cmd_init(args: argparse.Namespace) -> None:
         "overrides": {},
         "resolution": None,
     }
+    if args.report_lang:
+        # The report language is a *study* setting, so a rerun months later
+        # still writes the report in the language the study was asked for.
+        study["report_language"] = i18n.normalize_lang(args.report_lang)
     # Resolve (and thereby validate) the window *before* writing anything: a
     # rejected window must leave no manifest behind to confuse the next run.
     label, warnings = _window_info(study)
@@ -126,6 +147,8 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"wrote {study_path}")
     print(f"  topic:     {args.topic}")
     print(f"  languages: {', '.join(languages)}")
+    if study.get("report_language"):
+        print(f"  report:    {study['report_language']}")
     _print_window(label, warnings, indent="  ")
     if not window:
         print(
@@ -256,15 +279,23 @@ def stage_analyze(out_dir: Path) -> AnalysisPayload:
     return analysis
 
 
-def stage_chart(analysis: AnalysisPayload, out_dir: Path) -> dict[str, str]:
+def stage_chart(
+    analysis: AnalysisPayload,
+    out_dir: Path,
+    translator: i18n.Translator | None = None,
+) -> dict[str, str]:
     """Render the comparison chart as PNG and SVG inside ``out_dir``."""
-    paths = chart_mod.render(analysis, out_dir / "chart")
+    paths = chart_mod.render(analysis, out_dir / "chart", translator)
     print(f"  wrote {paths['png']}")
     print(f"  wrote {paths['svg']}")
     return paths
 
 
-def stage_report(analysis: AnalysisPayload, out_dir: Path) -> None:
+def stage_report(
+    analysis: AnalysisPayload,
+    out_dir: Path,
+    translator: i18n.Translator | None = None,
+) -> None:
     """Write ``report.html`` always and ``report.pdf`` when it fits one page.
 
     Raises:
@@ -275,12 +306,12 @@ def stage_report(analysis: AnalysisPayload, out_dir: Path) -> None:
     html_path = out_dir / "report.html"
     pdf_path = out_dir / "report.pdf"
     report_mod.render_html(
-        analysis, chart_png if chart_png.is_file() else None, html_path
+        analysis, chart_png if chart_png.is_file() else None, html_path, translator
     )
     print(f"  wrote {html_path}")
     try:
         report_mod.render_pdf(
-            analysis, chart_png if chart_png.is_file() else None, pdf_path
+            analysis, chart_png if chart_png.is_file() else None, pdf_path, translator
         )
     except report_mod.ReportOverflow as exc:
         print(f"  error: {exc}", file=sys.stderr)
@@ -299,6 +330,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     study = _load(Path(args.study))
     print(f"topic:     {study['topic']}")
     print(f"languages: {', '.join(study['languages'])}")
+    if study.get("report_language"):
+        print(f"report:    {study['report_language']}")
     label, warnings = _window_info(study)
     _print_window(label, warnings)
     if study.get("overrides"):
@@ -355,6 +388,24 @@ def cmd_clear_cache(args: argparse.Namespace) -> None:
     print(f"removed {removed} cached response(s) from {common.CACHE_DIR}")
 
 
+def cmd_i18n_template(args: argparse.Namespace) -> None:
+    """Write the English message reference file the agent translates in place.
+
+    Raises:
+        SystemExit: When the file exists and ``--force`` was not given --
+            overwriting a finished translation would silently lose it.
+    """
+    lang = i18n.normalize_lang(args.lang)
+    path = Path(args.out) if args.out else Path(f"translations.{lang}.json")
+    i18n.write_reference(path, lang, force=args.force)
+    print(f"wrote {path} ({len(i18n.MESSAGES)} messages)")
+    print('Translate every value in "messages" into the target language; keep')
+    print("the message ids and the {placeholder} names exactly as they are.")
+    print(
+        f"Then: run.py all --study <study.json> --out <dir> --report-lang {lang}"
+    )
+
+
 def cmd_run(args: argparse.Namespace, *, client: common.JsonFetcher) -> None:
     """Run one stage (``--stage``) or the whole pipeline in order.
 
@@ -377,21 +428,41 @@ def cmd_run(args: argparse.Namespace, *, client: common.JsonFetcher) -> None:
     study = _load(study_path)
     analysis: AnalysisPayload | None = None
 
-    for stage in stages:
-        print(f"[{stage}]")
-        if stage == "resolve":
-            study = stage_resolve(study, args, client=client)
-            _save(study_path, study)
-        elif stage == "fetch":
-            stage_fetch(study, out_dir, args, client=client)
-        elif stage == "analyze":
-            analysis = stage_analyze(out_dir)
-        elif stage == "chart":
-            analysis = analysis or common.read_json(out_dir / "analysis.json")
-            stage_chart(analysis, out_dir)
-        elif stage == "report":
-            analysis = analysis or common.read_json(out_dir / "analysis.json")
-            stage_report(analysis, out_dir)
+    # The report language only matters to the two stages that write
+    # human-facing artifacts, and both share one translator so the fallbacks
+    # recorded for the chart are still visible in the report's note.
+    translator: i18n.Translator | None = None
+    if {"chart", "report"} & set(stages):
+        lang = i18n.normalize_lang(
+            getattr(args, "report_lang", "") or study.get("report_language")
+        )
+        explicit = getattr(args, "translations", "")
+        translations = (
+            Path(explicit) if explicit else out_dir / f"translations.{lang}.json"
+        )
+        translator = i18n.translator_for(lang, translations)
+
+    try:
+        for stage in stages:
+            print(f"[{stage}]")
+            if stage == "resolve":
+                study = stage_resolve(study, args, client=client)
+                _save(study_path, study)
+            elif stage == "fetch":
+                stage_fetch(study, out_dir, args, client=client)
+            elif stage == "analyze":
+                analysis = stage_analyze(out_dir)
+            elif stage == "chart":
+                analysis = analysis or common.read_json(out_dir / "analysis.json")
+                stage_chart(analysis, out_dir, translator)
+            elif stage == "report":
+                analysis = analysis or common.read_json(out_dir / "analysis.json")
+                stage_report(analysis, out_dir, translator)
+    finally:
+        # Even when a stage failed, the caller must learn that the output is
+        # (partly) English rather than assume the requested language landed.
+        if translator is not None:
+            i18n.warn_untranslated(translator)
 
     if analysis is None and "analyze" in stages:
         return
@@ -450,6 +521,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--force", action="store_true", help="overwrite an existing manifest"
     )
+    init.add_argument(
+        "--report-lang",
+        default="",
+        help="language for the report and chart text, e.g. pl (default: English)",
+    )
     init.set_defaults(func=cmd_init)
 
     run = sub.add_parser("all", help="run every stage (default)")
@@ -460,6 +536,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--out", default=".", help="output directory (default: cwd)")
     run.add_argument("--qid", help="skip topic search; use this Wikidata id")
     run.add_argument("--search-lang", default="en", help="language for concept search")
+    run.add_argument(
+        "--report-lang",
+        default="",
+        help="report/chart language, e.g. pl; falls back to the study's "
+        "report_language, then English",
+    )
+    run.add_argument(
+        "--translations",
+        default="",
+        help="translations JSON (default: <out>/translations.<lang>.json)",
+    )
     run.set_defaults(func=cmd_run)
 
     # `resolve` on its own so the resolution can be *reviewed* (right concept?
@@ -487,6 +574,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     clear = sub.add_parser("clear-cache", help="delete cached API responses")
     clear.set_defaults(func=cmd_clear_cache)
+
+    # The English message reference the agent translates: run it once before
+    # the first `--report-lang` run, then edit the file it writes.
+    template = sub.add_parser(
+        "i18n-template",
+        help="write the English message reference file to translate",
+    )
+    template.add_argument("--lang", required=True, help="language code, e.g. pl")
+    template.add_argument(
+        "--out",
+        default="",
+        help="output path (default: translations.<lang>.json)",
+    )
+    template.add_argument(
+        "--force", action="store_true", help="overwrite an existing file"
+    )
+    template.set_defaults(func=cmd_i18n_template)
 
     return parser
 

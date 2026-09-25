@@ -39,3 +39,18 @@ def load_fixture(url: str) -> Any:
             "Run `uv run python tests/record_fixtures.py` to refresh fixtures."
         )
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def full_translation(lang: str = "xx", **overrides: str) -> dict[str, str]:
+    """A complete translations map: every message visibly marked as translated.
+
+    The join separators are deliberately left themselves -- prefixing them
+    would put the marker inside every list the report builds. ``i18n`` is
+    imported lazily because ``scripts/`` only lands on ``sys.path`` once
+    ``conftest`` has run (and ``helpers`` is imported *before* that).
+    """
+    import i18n
+
+    messages = {key: f"[{lang}] {text}" for key, text in i18n.MESSAGES.items()}
+    messages.update({"join.comma": ", ", "join.semicolon": "; ", **overrides})
+    return messages

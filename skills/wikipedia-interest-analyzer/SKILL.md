@@ -25,7 +25,7 @@ similar article.**
 ```bash
 cd skills/wikipedia-interest-analyzer
 uv sync                      # installs pinned deps from uv.lock
-uv run pytest                # optional: 182 offline tests, ~8s
+uv run pytest                # optional: 224 offline tests, ~10s
 ```
 
 **Treat the skill directory as read-only.** Every command takes `--study` (the
@@ -65,6 +65,10 @@ uv run python scripts/run.py init --topic "intermittent fasting" --langs pl,cs -
 Optional `--since 2024-10 --until 2026-08` fixes the window (default: the last
 24 complete months — `init` prints the resolved dates, not `(default)`). This
 writes a small manifest you can edit later instead of re-querying.
+
+Optional `--report-lang pl` sets the report/chart language once for every
+rerun (see [Report language](#report-language) — unless the user asks
+otherwise, use the language they prompted in).
 
 ### 2. Resolve the topic, then review it before fetching
 
@@ -121,6 +125,35 @@ Outputs land in `--out` (default: the current directory):
 | `report.pdf` | Strictly one page — the shareable artifact |
 | `report.html` | Same content, self-contained (chart embedded), no page limit |
 | `chart.png` / `chart.svg` | Two panels: absolute views, normalised share |
+| `translations.<lang>.json` | Report/chart strings for `--report-lang`; written (English) on first use, translated in place |
+
+### Report language
+
+The report and the chart are written in the language the user prompted in —
+unless they ask for another one. Pick the code yourself (`pl`, `cs`, `de`,
+`fr`, `pt-br`, … any language the agent can translate into); the skill ships
+**no** translation catalogue, you supply the wording.
+
+1. Pass the code: `run.py init … --report-lang pl` (stored in the manifest)
+   or per run: `run.py all … --report-lang pl`. Either way the report, the
+   PDF and every chart label use it.
+2. The first such run finds no translations and **writes
+   `<out>/translations.pl.json`** — the English messages keyed by id — then
+   renders this run in English with a visible note. Translate every value in
+   `"messages"` (keep the ids and the `{placeholder}` names exactly as they
+   are). Optionally pre-write it with
+   `run.py i18n-template --lang pl --out <path>` (`--force` to overwrite).
+3. Rerun with the same flag. Missing ids fall back to English — the report
+   then carries a visible `Warning (pl): Untranslated text: …` note naming
+   them, and stderr lists every id. **Never fail and never fall back
+   silently.**
+
+What stays English, deliberately: `analysis.json` (the data contract your
+answer is built from), `series.json`, the console progress/warning wording,
+and message ids everywhere. Numbers, article titles, language codes and the
+topic concept are never translated. The `Warning (pl):` prefix on the
+fallback note is fixed English so a partially-translated report still admits
+it in any language.
 
 ## Answering the user's question
 
@@ -159,6 +192,7 @@ with the same `--study`/`--out`:
 | Another language | `study.json` → `"languages": ["pl", "cs", "uk"]` |
 | Longer window | `study.json` → `"window": {"since": "2023-01", "until": "2026-08"}` — **use 23/24 or 47/48 months**, or the halves stop being the same calendar months and confidence is capped at `medium` (`init` warns) |
 | Different concept | re-run `init --force --study …`, or pass `--qid Q…` to `resolve`/`all` |
+| Report in another language | `run.py all --report-lang <code> …` (or `init --report-lang`); translate the new `translations.<code>.json` |
 | Try a substitute | `run.py override --lang … --title … --study …` |
 | Force fresh data | `run.py all --no-cache --study … --out …` |
 
@@ -178,6 +212,12 @@ with the same `--study`/`--out`:
    429/5xx, and a `User-Agent` on every call — Wikimedia requires one and the
    skill always sends it (set `WIA_USER_AGENT` to add your contact details).
    The numeric rate limit was never probed.
+7. **Write the report in the user's language** (see
+   [Report language](#report-language)); translate via
+   `translations.<lang>.json`, never by editing templates or shipped code.
+   Anything untranslated falls back to English *with a visible note* —
+   partial output is admitted, never hidden. Data files and console wording
+   stay English.
 
 ## When something goes wrong
 
@@ -192,6 +232,10 @@ with the same `--study`/`--out`:
 | `HTTP 404 … invalid route` | a malformed path (client bug), not missing data |
 | `no data for those date(s)` | valid request, nothing in that range; check the window is after 2015-07 |
 | `series.json not found -- run 'run.py all --stage fetch' first` | stages are ordered; run the earlier one (or just `all`) |
+| `warning: no translations for 'pl' at …` | first run in that language; the English reference was written — translate it and rerun |
+| `Warning (pl): Untranslated text: N of M …` | that many report strings had no translation and are in English; fill them in `translations.pl.json` and rerun |
+| `error: cannot read translations …` | the file is not valid JSON; fix it (a corrupt file stops the run rather than rendering English silently) |
+| `<path> already exists (use --force …)` | `i18n-template` will not overwrite a finished translation; add `--force` only to reset it |
 | `UnicodeEncodeError` printing a title | fixed by `common.configure_console()`; if you add a new entry point, call it |
 
 ## Deeper reading (load only when needed)

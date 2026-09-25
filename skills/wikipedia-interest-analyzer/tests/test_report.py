@@ -11,8 +11,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import i18n
 import pytest
 import report as report_mod
+from helpers import full_translation
 
 
 def _page_count(path) -> int:
@@ -229,3 +231,121 @@ def test_accented_title_is_measured_by_the_unicode_font_not_helvetica():
 def test_project_font_is_registered_before_anything_is_rendered():
     """reportlab falls back silently when the font was never registered."""
     assert report_mod.FONT in report_mod.pdfmetrics.getRegisteredFontNames()
+
+
+# ------------------------------------------------------- report language -----
+def test_english_report_carries_no_untranslated_note(golden_analysis, tmp_path):
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+
+    assert "Untranslated text" not in out.read_text(encoding="utf-8")
+
+
+def test_report_renders_in_the_requested_language(golden_analysis, tmp_path):
+    """Every reader-facing string must come from the translation, not English."""
+    translator = i18n.Translator("xx", full_translation("xx"))
+    out = tmp_path / "report.html"
+
+    report_mod.render_html(golden_analysis, None, out, translator)
+    html = out.read_text(encoding="utf-8")
+
+    assert '<html lang="xx">' in html
+    assert "<h1>[xx] Audience interest: intermittent fasting</h1>" in html
+    assert "<h2>[xx] Assumptions &amp; limitations</h2>" in html
+    assert "<th>[xx] Confidence</th>" in html
+    # The English wording is gone from the translated parts...
+    assert "<h1>Audience interest:" not in html
+    # ...but the data itself is untouched: numbers, titles, codes.
+    assert "38,863" in html
+    assert "Přerušovaný půst" in html
+    assert "Q1666254" in html
+    # Nothing fell back, so no note is shown.
+    assert "Untranslated text" not in html
+
+
+def test_a_partial_translation_is_flagged_inside_the_report(
+    golden_analysis, tmp_path
+):
+    """A report that is half English must say so where the reader is looking."""
+    translator = i18n.Translator(
+        "pl",
+        {
+            "report.title": "Zainteresowanie odbiorców: {topic}",
+            "report.col_lang": "Język",
+        },
+    )
+    out = tmp_path / "report.html"
+
+    report_mod.render_html(golden_analysis, None, out, translator)
+    html = out.read_text(encoding="utf-8")
+
+    assert "<h1>Zainteresowanie odbiorców: intermittent fasting</h1>" in html
+    assert "<th>Język</th>" in html
+    assert '<p class="gap"><strong>Warning</strong> (pl): Untranslated text:' in html
+    # The note must name what is missing, not just count it. It lists at most
+    # five ids (the reader gets a readable sentence, not a wall), so the
+    # assertion checks the shape rather than a fixed membership.
+    note = re.search(r'<p class="gap"><strong>Warning.*?</p>', html, re.S).group(0)
+    assert re.search(r"\b[a-z]+\.[a-z_]+\b", note), "the note must name missing ids"
+    assert re.search(r"\+\d+ more", note), "an over-long list must be summarised"
+
+
+def test_the_untranslated_note_does_not_break_the_one_page_pdf(
+    golden_analysis, tmp_path
+):
+    translator = i18n.Translator("pl", {"report.title": "Raport: {topic}"})
+    out = tmp_path / "report.pdf"
+
+    report_mod.render_pdf(golden_analysis, None, out, translator)
+
+    assert out.is_file()
+    assert _page_count(out) == 1
+
+
+def test_a_localised_report_still_fits_one_page(golden_analysis, tmp_path):
+    translator = i18n.Translator("xx", full_translation("xx"))
+    out = tmp_path / "report.pdf"
+
+    report_mod.render_pdf(golden_analysis, None, out, translator)
+
+    assert out.is_file()
+    assert _page_count(out) == 1
+
+
+def test_the_localised_headline_comes_from_the_refs_not_the_english_string(
+    golden_analysis, tmp_path
+):
+    translator = i18n.Translator(
+        "xx",
+        full_translation(
+            "xx",
+            **{
+                "headline.main": "VERDICT {topic} {span}: {parts}. "
+                "GRADE {grades}."
+            },
+        ),
+    )
+    out = tmp_path / "report.html"
+
+    report_mod.render_html(golden_analysis, None, out, translator)
+    html = out.read_text(encoding="utf-8")
+
+    assert "VERDICT &#x27;intermittent fasting&#x27;" in html
+    assert golden_analysis["headline"] not in html
+
+
+def test_fit_shortens_a_header_that_would_collide_with_its_neighbour():
+    long = "A translated header that is far too wide for this narrow column"
+    fitted = report_mod.fit(long, report_mod.FONT_BOLD, 7.8, 30.0)
+
+    assert len(fitted) < len(long)
+    assert fitted.endswith("\u2026")
+    assert (
+        report_mod.pdfmetrics.stringWidth(fitted, report_mod.FONT_BOLD, 7.8) <= 30.0
+    ), "a header must never spill into the next column"
+
+
+def test_fit_leaves_a_header_that_already_fits_untouched():
+    assert report_mod.fit("Confidence", report_mod.FONT_BOLD, 7.8, 100.0) == (
+        "Confidence"
+    )
