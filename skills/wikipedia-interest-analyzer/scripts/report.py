@@ -45,11 +45,32 @@ CONTENT_W = PAGE_W - 2 * MARGIN
 BOTTOM = MARGIN
 
 ACCENT = HexColor("#1f4e79")
+ACCENT_DEEP = HexColor("#0f3358")
+GOLD = HexColor("#e0a33e")
 MUTED = HexColor("#666666")
 RULE = HexColor("#d9d9d9")
 VERDICT_BG = HexColor("#f3f7fb")
 HEADER_BG = HexColor("#f0f0f0")
 INK = HexColor("#1a1a1a")
+WHITE = HexColor("#ffffff")
+SUBTITLE_ON_DARK = HexColor("#cfe1f2")
+
+# Editorial palette shared with the HTML template (assets/report_template.html).
+ZEBRA = HexColor("#f6f9fc")
+GAP_ROW_BG = HexColor("#fdf4f4")
+UP_FG, UP_BG = HexColor("#127a3e"), HexColor("#e3f5ea")
+DOWN_FG, DOWN_BG = HexColor("#b3261e"), HexColor("#fbe7e5")
+MEDIUM_FG, MEDIUM_BG = HexColor("#8a5b00"), HexColor("#fdf3e0")
+GAP_FG = HexColor("#a11111")
+FLAT_FG = HexColor("#6b7785")
+
+#: grade -> (pill background, pill text) for the confidence badges.
+GRADE_PILLS: dict[str, tuple[Color, Color]] = {
+    "high": (UP_BG, UP_FG),
+    "medium": (MEDIUM_BG, MEDIUM_FG),
+    "low": (DOWN_BG, DOWN_FG),
+    "gap": (DOWN_BG, GAP_FG),
+}
 
 MAX_CHART_HEIGHT = 250.0
 
@@ -262,7 +283,8 @@ def table_rows_for(
             stored in ``analysis.json``.
 
     Returns:
-        Row dicts keyed by column name plus the ``"gap"`` marker.
+        Row dicts keyed by column name, plus the ``"gap"`` marker and the
+        ``"grade"`` (confidence pill class) presentation hint.
     """
     tr = translator or i18n.english()
     rows: list[dict[str, str]] = []
@@ -271,6 +293,7 @@ def table_rows_for(
         rows.append(
             {
                 "gap": "",
+                "grade": metric["confidence"],
                 "Lang": language,
                 "Article": metric["article_title"],
                 "Views": f"{metric['article_total']:,}",
@@ -285,6 +308,7 @@ def table_rows_for(
         rows.append(
             {
                 "gap": "gap",
+                "grade": "gap",
                 "Lang": language,
                 "Article": tr.t("report.gap_article"),
                 "Views": "\u2014",
@@ -311,6 +335,184 @@ def gaps_note(
         langs=tr.t("join.comma").join(gaps),
     )
     return f' <span class="gap">{html.escape(note)}</span>'
+
+
+# --------------------------------------------------------------------------
+# Editorial components (shared vocabulary: HTML builds them, PDF echoes them)
+# --------------------------------------------------------------------------
+def trend_class(value: float | None) -> str:
+    """Map a signed percentage to the ``up``/``down``/``flat`` style class.
+
+    Args:
+        value: A percentage, or ``None`` when the metric is unavailable.
+
+    Returns:
+        ``"up"`` for a positive change, ``"down"`` for a negative one, and
+        ``"flat"`` for zero *or* ``None`` -- "no data" must not read as a
+        movement in either direction.
+    """
+    if value is None or value == 0:
+        return "flat"
+    return "up" if value > 0 else "down"
+
+
+def trend_arrow(kind: str) -> str:
+    """The glyph for a ``trend_class`` result ("" for ``flat``)."""
+    return {"up": "\u25b2", "down": "\u25bc"}.get(kind, "")
+
+
+def confidence_pill_html(grade: str, label: str) -> str:
+    """A confidence badge: ``<span class="pill pill-high">HIGH</span>``.
+
+    Args:
+        grade: ``high``/``medium``/``low`` (or ``gap`` for a coverage gap) --
+            it selects the CSS class, never the wording.
+        label: Already-translated, already-cased text to show inside.
+
+    Returns:
+        The escaped badge markup; an unknown grade degrades to ``pill-gap``
+        styling rather than dropping the badge.
+    """
+    css = grade if grade in GRADE_PILLS else "gap"
+    return f'<span class="pill pill-{css}">{html.escape(label)}</span>'
+
+
+def _colour_for(analysis: AnalysisPayload, language: str) -> str:
+    """The series colour for ``language`` (same order as the chart lines)."""
+    measured = [
+        lang
+        for lang, m in analysis["metrics"].items()
+        if m.get("series") and m["series"]["labels"]
+    ]
+    try:
+        index = measured.index(language)
+    except ValueError:
+        return common.SERIES_COLOURS[0]
+    return common.SERIES_COLOURS[index % len(common.SERIES_COLOURS)]
+
+
+def sparkline_svg(
+    values: list[float],
+    colour: str,
+    alt: str,
+    width: int = 160,
+    height: int = 30,
+) -> str:
+    """A tiny inline SVG line chart of ``values`` (self-contained, no scripts).
+
+    Args:
+        values: The monthly series to plot (share per million).
+        colour: Hex stroke colour; also used for the translucent area fill.
+        alt: Accessible description (translated by the caller).
+        width: Viewport width in user units.
+        height: Viewport height in user units.
+
+    Returns:
+        An ``<svg>`` string, or ``""`` when there is nothing honest to draw
+        (fewer than two points cannot show a trend).
+    """
+    if len(values) < 2:
+        return ""
+    lo, hi = min(values), max(values)
+    span = (hi - lo) or 1.0
+    pad = 2.0
+    step = (width - 2 * pad) / (len(values) - 1)
+    points = [
+        (
+            pad + index * step,
+            height - pad - ((value - lo) / span) * (height - 2 * pad),
+        )
+        for index, value in enumerate(values)
+    ]
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+    area = f"{pad:.1f},{height - pad:.1f} {line} {width - pad:.1f},{height - pad:.1f}"
+    label = html.escape(alt)
+    return (
+        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{label}" '
+        f'preserveAspectRatio="none">'
+        f'<polygon points="{area}" fill="{colour}" opacity="0.13"/>'
+        f'<polyline points="{line}" fill="none" stroke="{colour}" '
+        f'stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>'
+        f"</svg>"
+    )
+
+
+def kpi_tiles_for(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> str:
+    """The KPI tile grid: one card per measured language, then gap cards.
+
+    Each tile answers "how big, which way, how much do we trust it" without
+    reading the table: a big YoY-share number with an arrow, the two
+    supporting counts, a confidence pill and a sparkline of the real monthly
+    share series. Coverage gaps get their own dashed card, so a missing
+    article stays visible instead of vanishing from the summary.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        translator: Target language; English when omitted.
+
+    Returns:
+        HTML for a ``<section class="kpis">`` block ("" with no metrics *and*
+        no gaps -- nothing to summarise).
+    """
+    tr = translator or i18n.english()
+    tiles: list[str] = []
+    for language, metric in analysis["metrics"].items():
+        yoy = metric["yoy"]
+        share_pct = yoy.get("share_pct")
+        kind = trend_class(share_pct)
+        series = metric.get("series")
+        sparkline = sparkline_svg(
+            list(series["share_ppm"]) if series else [],
+            _colour_for(analysis, language),
+            tr.t("report.sparkline_alt", lang=language),
+        )
+        tiles.append(
+            '<article class="tile" style="--series:{}">'
+            '<div class="tile-head">'
+            '<span class="tile-lang">{}</span>{}</div>'
+            '<div class="tile-title">{}</div>'
+            '<div class="tile-hero {}">'
+            '<span class="arrow" aria-hidden="true">{}</span>{}</div>'
+            '<div class="tile-hero-label">{}</div>'
+            '<div class="tile-stats">'
+            '<div class="tile-stat"><b>{}</b><span>{}</span></div>'
+            '<div class="tile-stat"><b>{}</b><span>{}</span></div>'
+            "</div>{}</article>".format(
+                _colour_for(analysis, language),
+                html.escape(language),
+                confidence_pill_html(
+                    metric["confidence"],
+                    tr.t(f"confidence.{metric['confidence']}").upper(),
+                ),
+                html.escape(metric["article_title"]),
+                kind,
+                trend_arrow(kind),
+                html.escape(fmt_pct(share_pct, tr)),
+                html.escape(tr.t("report.kpi_yoy")),
+                f"{metric['article_total']:,}",
+                html.escape(tr.t("report.kpi_views")),
+                f"{metric['share_ppm']:.2f}",
+                html.escape(tr.t("report.kpi_share")),
+                sparkline,
+            )
+        )
+    for language in analysis.get("gaps", []):
+        tiles.append(
+            '<article class="tile gap-tile">'
+            '<div class="tile-head">'
+            f'<span class="tile-lang">{html.escape(language)}</span>'
+            f"{confidence_pill_html('gap', tr.t('report.gap_confidence'))}</div>"
+            f'<div class="tile-title">{html.escape(tr.t("report.gap_article"))}</div>'
+            '<div class="tile-hero flat"><span class="arrow" aria-hidden="true"></span>'
+            f'{html.escape(tr.t("report.na"))}</div>'
+            f'<div class="tile-hero-label">{html.escape(tr.t("report.kpi_yoy"))}</div>'
+            "</article>"
+        )
+    if not tiles:
+        return ""
+    return '<section class="kpis">' + "".join(tiles) + "</section>"
 
 
 # --------------------------------------------------------------------------
@@ -386,11 +588,43 @@ def _render_caveats(
 
 
 def _table_cell(name: str, row: dict[str, str]) -> str:
-    """One ``<td>``; a gap row's Article cell gets the ``gap`` marker span."""
+    """One ``<td>``; styled by role, with gap markers preserved.
+
+    YoY cells get the trend class (green/red/grey) so direction reads at a
+    glance, and the Confidence cell becomes a pill -- both purely presentational:
+    the text inside is exactly what :func:`table_rows_for` produced.
+
+    The direction is read from the *sign of the rendered text* (``+``/``-``)
+    rather than the raw number: the cell is what the reader sees, so what is
+    coloured can never disagree with what is printed.
+    """
     value = html.escape(row[name])
     if row["gap"] and name == "Article":
         return f'<td><span class="gap">{value}</span></td>'
+    if row["gap"]:
+        return f'<td class="flat">{value}</td>'
+    if name in {"YoY abs", "YoY share"}:
+        if value.startswith("+"):
+            kind = "up"
+        elif value.startswith("-"):
+            kind = "down"
+        else:
+            kind = "flat"
+        return f'<td class="{kind}">{value}</td>'
+    if name == "Confidence":
+        return f"<td>{confidence_pill_html(row['grade'], value)}</td>"
     return f"<td>{value}</td>"
+
+
+def _table_row(row: dict[str, str]) -> str:
+    """One ``<tr>``; a coverage-gap row also carries the ``gap-row`` class.
+
+    The class is what paints the row red/italic in the template's CSS, so a
+    missing article stays visible as a *row*, not just as red cell text.
+    """
+    cls = ' class="gap-row"' if row["gap"] else ""
+    cells = "".join(_table_cell(name, row) for name, _ in TABLE_COLUMNS)
+    return f"<tr{cls}>{cells}</tr>"
 
 
 def render_html(
@@ -434,8 +668,7 @@ def render_html(
         for name, _ in TABLE_COLUMNS
     )
     body_rows = [
-        "<tr>" + "".join(_table_cell(name, row) for name, _ in TABLE_COLUMNS) + "</tr>"
-        for row in table_rows_for(analysis, tr)
+        _table_row(row) for row in table_rows_for(analysis, tr)
     ]
 
     table_block = (
@@ -454,10 +687,13 @@ def render_html(
     # strings that fell back to English, so it is only accurate afterwards.
     title = tr.t("report.title", topic=str(analysis["topic"]))
     subtitle = subtitle_for(analysis, tr)
+    kicker = tr.t("report.kicker")
+    verdict_tag = tr.t("report.verdict_tag")
     heading = tr.t("report.assumptions_heading")
     footer = footer_for(analysis, tr)
     headline = headline_for(analysis, tr)
     gap_note = gaps_note(analysis, tr)
+    kpi_block = kpi_tiles_for(analysis, tr)
     note = tr.note()
     note_block = (
         f'<p class="gap"><strong>Warning</strong> ({html.escape(tr.lang)}): '
@@ -469,9 +705,12 @@ def render_html(
     rendered = template.substitute(
         html_lang=html.escape(tr.display_lang),
         title=html.escape(title),
+        kicker=html.escape(kicker),
+        verdict_tag=html.escape(verdict_tag),
         h1=html.escape(title),
         subtitle=html.escape(subtitle),
         headline=html.escape(headline) + gap_note,
+        kpi_block=kpi_block,
         chart_block=chart_block,
         table_block=table_block,
         heading=html.escape(heading),
@@ -550,6 +789,64 @@ class _Sheet:
         self.y -= height
 
 
+def _cell_colour(name: str, value: str) -> Color:
+    """Colour for a numeric table cell: trend direction, else neutral ink.
+
+    Args:
+        name: Column name (only the YoY columns are trend-coloured).
+        value: The rendered cell text; its sign is the direction the reader
+            sees, so the colour can never contradict the number.
+
+    Returns:
+        Reportlab colour to draw the value in.
+    """
+    if name in {"YoY abs", "YoY share"}:
+        if value.startswith("+"):
+            return UP_FG
+        if value.startswith("-"):
+            return DOWN_FG
+    return INK
+
+
+def _draw_pill(
+    writer: pdf_canvas.Canvas,
+    grade: str,
+    label: str,
+    x: float,
+    width: float,
+    row_y: float,
+    row_height: float,
+) -> None:
+    """Draw the confidence badge as a rounded, filled pill.
+
+    Args:
+        writer: Canvas to draw on.
+        grade: ``high``/``medium``/``low``/``gap`` -- selects the colours;
+            an unknown grade degrades to the ``gap`` palette.
+        label: Already-translated badge text.
+        x: Column left edge.
+        width: Column width.
+        row_y: Row bottom (the cursor position for this row).
+        row_height: Row height, so the pill centres vertically in it.
+    """
+    bg, fg = GRADE_PILLS.get(grade, GRADE_PILLS["gap"])
+    size = 7.0
+    pill_h = 9.5
+    max_w = width - 6
+    # A translation wider than its column is shortened rather than spilling
+    # over the neighbour (same rule the header row follows).
+    label = fit(label, FONT_BOLD, size, max_w - 10)
+    text_w = pdfmetrics.stringWidth(label, FONT_BOLD, size)
+    pill_w = min(text_w + 10, max_w)
+    pill_x = x + width - 4 - pill_w
+    pill_y = row_y + (row_height - pill_h) / 2
+    writer.setFillColor(bg)
+    writer.roundRect(pill_x, pill_y, pill_w, pill_h, pill_h / 2, stroke=0, fill=1)
+    writer.setFillColor(fg)
+    writer.setFont(FONT_BOLD, size)
+    writer.drawCentredString(pill_x + pill_w / 2, pill_y + 2.6, label)
+
+
 def render_pdf(
     analysis: AnalysisPayload,
     chart_png: Path | None,
@@ -578,33 +875,59 @@ def render_pdf(
     writer.setAuthor("wikipedia-interest-analyzer")
     sheet = _Sheet(writer)
 
-    # --- header ------------------------------------------------------------
-    sheet.text(title, FONT_BOLD, 17, 21, what="report title")
-    sheet.text(
-        subtitle_for(analysis, tr), FONT, 8, 11, color=MUTED, what="subtitle"
-    )
-    sheet.gap(3)
-    writer.setStrokeColor(ACCENT)
-    writer.setLineWidth(2.2)
-    writer.line(MARGIN, sheet.y, PAGE_W - MARGIN, sheet.y)
-    sheet.gap(10)
+    # --- header: accent band with white title (replaces the thin rule) ------
+    # The band is decoration only: it wraps the same two blocks the old header
+    # printed, so the vertical budget grows only by its padding.
+    subtitle = subtitle_for(analysis, tr)
+    title_lines = wrap(title, FONT_BOLD, 17, CONTENT_W - 20)
+    subtitle_lines = wrap(subtitle, FONT, 8, CONTENT_W - 20)
+    band_height = 8 + 21 * len(title_lines) + 11 * len(subtitle_lines) + 8
+    sheet.need(band_height + 10, "header band")
+    band_top = sheet.y + 6
+    writer.setFillColor(ACCENT)
+    band_bottom = band_top - band_height
+    writer.rect(MARGIN, band_bottom, CONTENT_W, band_height, stroke=0, fill=1)
+    cursor = band_top - 8
+    writer.setFont(FONT_BOLD, 17)
+    for line in title_lines:
+        cursor -= 21
+        writer.setFillColor(WHITE)
+        writer.drawString(MARGIN + 10, cursor, line)
+    writer.setFont(FONT, 8)
+    for line in subtitle_lines:
+        cursor -= 11
+        writer.setFillColor(SUBTITLE_ON_DARK)
+        writer.drawString(MARGIN + 10, cursor, line)
+    writer.setFillColor(GOLD)
+    writer.rect(MARGIN, band_top - band_height, CONTENT_W, 2, stroke=0, fill=1)
+    sheet.y = band_top - band_height - 10
 
-    # --- verdict -----------------------------------------------------------
+    # --- verdict: dark panel, gold rule and tag ----------------------------
     # ``headline`` already ends with the coverage-gap sentence when there are
     # gaps (analyze.py appends it), so the PDF prints it exactly once -- the
     # old second copy cost one-page space and read as a stutter.
     verdict = headline_for(analysis, tr)
+    tag = tr.t("report.verdict_tag").upper()
     verdict_lines = wrap(verdict, FONT, 9.5, CONTENT_W - 22)
-    box_height = 12.5 * len(verdict_lines) + 16
+    tag_width = pdfmetrics.stringWidth(tag, FONT_BOLD, 7.0) + 12
+    box_height = 14 + 12.5 * len(verdict_lines) + 16
     sheet.need(box_height + 10, "verdict box")
     box_top = sheet.y
-    writer.setFillColor(VERDICT_BG)
+    writer.setFillColor(ACCENT_DEEP)
     writer.rect(MARGIN, box_top - box_height, CONTENT_W, box_height, stroke=0, fill=1)
-    writer.setFillColor(ACCENT)
+    writer.setFillColor(GOLD)
     writer.rect(MARGIN, box_top - box_height, 3, box_height, stroke=0, fill=1)
-    writer.setFillColor(INK)
+    # Tag chip: sits at the top-left of the panel, above the verdict text.
+    writer.setFillColor(GOLD)
+    writer.roundRect(
+        MARGIN + 11, box_top - 12, tag_width, 11, 5.5, stroke=0, fill=1
+    )
+    writer.setFillColor(ACCENT_DEEP)
+    writer.setFont(FONT_BOLD, 7.0)
+    writer.drawCentredString(MARGIN + 11 + tag_width / 2, box_top - 9.5, tag)
+    writer.setFillColor(WHITE)
     writer.setFont(FONT, 9.5)
-    cursor = box_top - 8
+    cursor = box_top - 22
     for line in verdict_lines:
         cursor -= 12.5
         writer.drawString(MARGIN + 11, cursor, line)
@@ -648,10 +971,10 @@ def render_pdf(
         cursor_x += width
 
     header_top = sheet.y
-    writer.setFillColor(HEADER_BG)
+    writer.setFillColor(ACCENT)
     writer.rect(MARGIN, header_top - 16, CONTENT_W, 16, stroke=0, fill=1)
     writer.setFont(FONT_BOLD, 7.8)
-    writer.setFillColor(INK)
+    writer.setFillColor(WHITE)
     for (name, width), x in zip(TABLE_COLUMNS, x_positions, strict=True):
         # A translated header can be longer than its fixed column: shorten it
         # rather than let it collide with the neighbour it shares a row with.
@@ -663,15 +986,28 @@ def render_pdf(
             writer.drawRightString(right, header_top - 11.5, value)
     sheet.y = header_top - 16
 
-    for row in rows:
+    for index, row in enumerate(rows):
         sheet.y -= row_height
-        writer.setFont(FONT, 7.8)
-        writer.setFillColor(HexColor("#a11111") if row["gap"] else INK)
+        if row["gap"]:
+            writer.setFillColor(GAP_ROW_BG)
+            writer.rect(MARGIN, sheet.y, CONTENT_W, row_height, stroke=0, fill=1)
+        elif index % 2:
+            writer.setFillColor(ZEBRA)
+            writer.rect(MARGIN, sheet.y, CONTENT_W, row_height, stroke=0, fill=1)
         for (name, width), x in zip(TABLE_COLUMNS, x_positions, strict=True):
             value = row[name]
+            if name == "Confidence":
+                _draw_pill(writer, row["grade"], value, x, width, sheet.y, row_height)
+                continue
             if name in ALIGN_LEFT:
+                writer.setFillColor(GAP_FG if row["gap"] else INK)
+                writer.setFont(FONT, 7.8)
                 writer.drawString(x + 4, sheet.y + 3.5, value)
             else:
+                writer.setFont(FONT, 7.8)
+                writer.setFillColor(
+                    INK if row["gap"] else _cell_colour(name, value)
+                )
                 writer.drawRightString(x + width - 4, sheet.y + 3.5, value)
         writer.setStrokeColor(RULE)
         writer.setLineWidth(0.5)
@@ -679,12 +1015,18 @@ def render_pdf(
     sheet.gap(8)
 
     # --- assumptions & limitations ----------------------------------------
+    heading = tr.t("report.assumptions_heading").upper()
+    sheet.need(12, "limitations heading")
+    writer.setFillColor(GOLD)
+    writer.rect(MARGIN, sheet.y - 10, 3, 10, stroke=0, fill=1)
     sheet.text(
-        tr.t("report.assumptions_heading").upper(),
+        heading,
         FONT_BOLD,
         8.5,
         12,
         color=ACCENT,
+        x=MARGIN + 9,
+        max_width=CONTENT_W - 9,
         what="limitations heading",
     )
     for item in caveat_items(analysis, tr):

@@ -68,6 +68,135 @@ def test_html_escapes_hostile_text(golden_analysis, tmp_path):
     assert "&lt;script&gt;" in html
 
 
+# ------------------------------------------------- editorial HTML components ---
+def test_html_kpi_tiles_carry_the_real_numbers(golden_analysis, tmp_path):
+    """Each measured language gets a tile with the numbers from analysis.json."""
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert '<section class="kpis">' in html
+    # The hero figure is the YoY share the verdict is built from.
+    assert report_mod.fmt_pct(
+        golden_analysis["metrics"]["cs"]["yoy"]["share_pct"]
+    ) in html
+    for language, metric in golden_analysis["metrics"].items():
+        assert f"<span class=\"tile-lang\">{language}</span>" in html
+        assert f"{metric['article_total']:,}" in html, "views must be the real count"
+    assert "YoY share" in html
+    assert "Total views" in html
+    assert "Share per million" in html
+
+
+def test_html_kpi_trend_arrow_matches_the_sign_of_the_number(
+    golden_analysis, tmp_path
+):
+    """The hero shows arrow + class + number; all three must agree on direction.
+
+    A tile that coloured "+4.1%" red (or drew an up-arrow next to it) would
+    invert the verdict the reader takes away, so each tile's markup is checked
+    against the sign of its own value.
+    """
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    heroes = re.findall(
+        r'<div class="tile-hero (\w+)">'
+        r'<span class="arrow" aria-hidden="true">(.*?)</span>([^<]*)</div>',
+        html,
+    )
+    assert len(heroes) == len(golden_analysis["metrics"])
+    for kind, arrow, shown in heroes:
+        expected_arrow = report_mod.trend_arrow(kind)
+        assert arrow == expected_arrow, f"{shown}: arrow disagrees with class {kind}"
+        if kind == "up":
+            assert shown.startswith("+"), f"{shown} is not a rise"
+        elif kind == "down":
+            assert shown.startswith("-"), f"{shown} is not a fall"
+        else:
+            assert shown == report_mod.fmt_pct(None), f"{shown} must read as n/a"
+
+    # Arrow glyphs are only drawn for a direction that exists.
+    assert report_mod.trend_arrow("up") == "▲"
+    assert report_mod.trend_arrow("down") == "▼"
+    assert report_mod.trend_arrow("flat") == "", "no data must not fake a direction"
+
+
+def test_html_embeds_a_sparkline_for_every_measured_language(
+    golden_analysis, tmp_path
+):
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert html.count("<svg viewBox=") == len(golden_analysis["metrics"])
+    assert 'aria-label="cs share per million, month by month"' in html
+
+
+def test_a_gap_language_gets_a_tile_that_says_it_is_not_measurable(
+    gap_analysis, tmp_path
+):
+    out = tmp_path / "report.html"
+    report_mod.render_html(gap_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert '<article class="tile gap-tile">' in html
+    assert '<span class="tile-lang">pl</span>' in html
+    # The gap tile must not show a fabricated number.
+    gap_tile = html.split('<article class="tile gap-tile">')[1].split("</article>")[0]
+    assert "no article exists" in gap_tile
+    assert report_mod.trend_arrow("flat") == ""
+    assert "▲" not in gap_tile and "▼" not in gap_tile
+
+
+def test_gap_rows_carry_the_row_level_gap_class(gap_analysis, tmp_path):
+    """The CSS paints a gap row red/italic only if the row says it is one."""
+    out = tmp_path / "report.html"
+    report_mod.render_html(gap_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert '<tr class="gap-row">' in html
+    assert html.count('<tr class="gap-row">') == len(gap_analysis["gaps"])
+
+
+def test_confidence_pill_uses_the_grade_for_style_and_the_label_for_words():
+    """The grade picks the colour; only the label is translatable text."""
+    assert report_mod.confidence_pill_html("high", "HIGH") == (
+        '<span class="pill pill-high">HIGH</span>'
+    )
+    assert report_mod.confidence_pill_html("medium", "MEDIUM") == (
+        '<span class="pill pill-medium">MEDIUM</span>'
+    )
+    assert report_mod.confidence_pill_html("low", "LOW") == (
+        '<span class="pill pill-low">LOW</span>'
+    )
+    assert report_mod.confidence_pill_html("gap", "not measurable") == (
+        '<span class="pill pill-gap">not measurable</span>'
+    )
+    # An unknown grade degrades to a visible badge rather than dropping it.
+    assert report_mod.confidence_pill_html("bogus", "X") == (
+        '<span class="pill pill-gap">X</span>'
+    )
+
+
+def test_sparkline_refuses_to_draw_a_trend_from_too_few_points():
+    """Two points cannot show a trend; one cannot show anything at all."""
+    assert report_mod.sparkline_svg([], "#1f77b4", "alt") == ""
+    assert report_mod.sparkline_svg([1.0], "#1f77b4", "alt") == ""
+    svg = report_mod.sparkline_svg([1.0, 2.0, 3.0], "#1f77b4", "alt")
+    assert svg.startswith("<svg")
+    assert 'stroke="#1f77b4"' in svg
+    assert 'aria-label="alt"' in svg
+
+
+def test_flat_series_still_draws_a_line():
+    """A perfectly flat series has a real span of zero -- it must not divide by it."""
+    svg = report_mod.sparkline_svg([5.0, 5.0, 5.0], "#1f77b4", "alt")
+    assert svg != ""
+    assert "nan" not in svg.lower()
+
+
 # ------------------------------------------------------------------- PDF ------
 def test_pdf_is_exactly_one_letter_page(golden_analysis, tmp_path):
     out = tmp_path / "report.pdf"
@@ -194,6 +323,7 @@ def test_table_rows_describe_both_languages_and_the_gap(gap_analysis):
     data_row = next(row for row in rows if row["Lang"] == "cs")
     assert data_row["Article"] == "Přerušovaný půst"
     assert data_row["Confidence"] == "MEDIUM"
+    assert data_row["grade"] == "medium", "the pill class comes from the grade"
 
 
 def test_fmt_pct_renders_signed_one_decimal_and_none_for_missing():

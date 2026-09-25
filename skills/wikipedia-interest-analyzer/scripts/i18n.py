@@ -100,6 +100,15 @@ MESSAGES: dict[str, str] = {
         "Figure: absolute monthly pageviews (top) and normalised share of all "
         "wiki pageviews (bottom)."
     ),
+    # --- report: editorial blocks (kicker, verdict tag, KPI tiles) ----------
+    "report.kicker": "Wikipedia interest report",
+    "report.verdict_tag": "Verdict",
+    "report.kpi_views": "Total views",
+    "report.kpi_share": "Share per million",
+    "report.kpi_yoy": "YoY share",
+    "report.sparkline_alt": "{lang} share per million, month by month",
+    "report.trend_up": "trending up",
+    "report.trend_down": "trending down",
     # --- chart ------------------------------------------------------------
     "chart.views_ylabel": "views / month",
     "chart.views_title": "Absolute monthly pageviews",

@@ -5,44 +5,173 @@
 <title>$title</title>
 <style>
   @page { size: Letter; margin: 12mm; }
-  :root { --ink: #1a1a1a; --muted: #666; --rule: #d9d9d9; --accent: #1f4e79; }
+  :root {
+    --ink: #16202b; --muted: #5b6b7c; --rule: #e2e8f0;
+    --accent: #1f4e79; --accent-deep: #0f3358; --accent-light: #2b6ca8;
+    --gold: #e0a33e;
+    --up: #127a3e; --up-bg: #e3f5ea;
+    --down: #b3261e; --down-bg: #fbe7e5;
+    --flat: #6b7785; --flat-bg: #eef1f5;
+    --gap-fg: #a11111;
+    --paper: #ffffff; --stage: #edf1f6;
+  }
   * { box-sizing: border-box; }
   body {
     font-family: "Segoe UI", Helvetica, Arial, sans-serif;
-    color: var(--ink); margin: 0; padding: 14mm 12mm;
-    font-size: 10.5pt; line-height: 1.4; max-width: 190mm; margin: 0 auto;
+    color: var(--ink); margin: 0; padding: 16px 12mm;
+    font-size: 10.5pt; line-height: 1.45; background: var(--stage);
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
   }
-  header { border-bottom: 2.5pt solid var(--accent); padding-bottom: 6pt; margin-bottom: 10pt; }
-  h1 { font-size: 17pt; margin: 0 0 3pt; color: var(--accent); line-height: 1.2; }
-  .subtitle { font-size: 9pt; color: var(--muted); }
+  .page {
+    max-width: 190mm; margin: 0 auto; background: var(--paper);
+    box-shadow: 0 3px 18px rgba(15, 51, 88, .18);
+  }
+
+  /* ---- masthead ---- */
+  header {
+    background: linear-gradient(135deg, var(--accent-deep) 0%, var(--accent) 58%, var(--accent-light) 100%);
+    color: #fff; padding: 14pt 14pt 12pt;
+    border-bottom: 3pt solid var(--gold);
+  }
+  .kicker {
+    font-size: 7.5pt; font-weight: 700; letter-spacing: 1.6pt;
+    text-transform: uppercase; color: var(--gold); margin-bottom: 5pt;
+  }
+  h1 { font-size: 21pt; margin: 0 0 4pt; color: #fff; line-height: 1.15; }
+  .subtitle { font-size: 8.5pt; color: #cfe1f2; }
+
+  main { padding: 12pt 14pt 0; }
+
+  /* ---- verdict ---- */
   .verdict {
-    background: #f3f7fb; border-left: 3pt solid var(--accent);
-    padding: 8pt 10pt; margin: 0 0 10pt; font-size: 10.5pt;
+    background: var(--accent-deep); color: #fff;
+    border-left: 4pt solid var(--gold);
+    padding: 9pt 11pt 10pt; margin: 0 0 12pt; font-size: 10.5pt;
+    position: relative;
   }
-  figure { margin: 0 0 10pt; text-align: center; }
+  .verdict-tag {
+    display: inline-block; background: var(--gold); color: var(--accent-deep);
+    font-size: 6.5pt; font-weight: 700; letter-spacing: 1.2pt;
+    text-transform: uppercase; padding: 1.5pt 6pt; margin-bottom: 5pt;
+  }
+
+  /* ---- KPI tiles ---- */
+  .kpis {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8pt; margin: 0 0 12pt;
+  }
+  .tile {
+    border: 1pt solid var(--rule); border-top: 3pt solid var(--series, var(--accent));
+    padding: 7pt 8pt 6pt; background: #fff;
+  }
+  .tile-head { display: flex; justify-content: space-between; align-items: center; gap: 6pt; }
+  .tile-lang {
+    font-size: 8pt; font-weight: 700; letter-spacing: 1pt;
+    color: var(--series, var(--accent)); text-transform: uppercase;
+  }
+  .tile-title {
+    font-size: 8pt; color: var(--muted); margin: 1pt 0 5pt;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .tile-hero { font-size: 17pt; font-weight: 700; line-height: 1.1; }
+  .tile-hero.up { color: var(--up); }
+  .tile-hero.down { color: var(--down); }
+  .tile-hero.flat { color: var(--flat); }
+  .tile-hero .arrow { font-size: 11pt; }
+  .tile-hero-label {
+    font-size: 6.5pt; font-weight: 700; letter-spacing: 1pt;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 6pt;
+  }
+  .tile-stats { display: flex; gap: 10pt; margin-bottom: 4pt; }
+  .tile-stat { flex: 1; }
+  .tile-stat b { display: block; font-size: 10pt; font-weight: 700; }
+  .tile-stat span {
+    display: block; font-size: 6.5pt; letter-spacing: .6pt;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .tile svg { display: block; width: 100%; height: 30pt; }
+  .tile.gap-tile {
+    background: #fbf7f7; border-top-style: dashed; border-top-color: var(--gap-fg);
+  }
+  .tile.gap-tile .tile-lang { color: var(--gap-fg); }
+
+  /* ---- pills ---- */
+  .pill {
+    display: inline-block; font-size: 7pt; font-weight: 700;
+    letter-spacing: .5pt; text-transform: uppercase;
+    padding: 1pt 7pt; border-radius: 999px; white-space: nowrap;
+  }
+  .pill-high { background: var(--up-bg); color: var(--up); }
+  .pill-medium { background: #fdf3e0; color: #8a5b00; }
+  .pill-low { background: var(--down-bg); color: var(--down); }
+  .pill-gap { background: var(--down-bg); color: var(--gap-fg); font-style: italic; }
+
+  /* ---- chart ---- */
+  figure {
+    margin: 0 0 12pt; text-align: center;
+    border: 1pt solid var(--rule); padding: 8pt 8pt 5pt; background: #fff;
+  }
   figure img { max-width: 100%; height: auto; }
-  figcaption { font-size: 8pt; color: var(--muted); margin-top: 3pt; }
-  table { width: 100%; border-collapse: collapse; font-size: 8.5pt; margin-bottom: 10pt; }
-  th, td { padding: 3.5pt 5pt; text-align: right; border-bottom: 0.5pt solid var(--rule); }
-  th { background: #f0f0f0; font-weight: 600; text-align: right; }
+  figure.gap { color: var(--gap-fg); font-style: italic; padding: 10pt; }
+  figcaption { font-size: 7.5pt; color: var(--muted); margin-top: 4pt; }
+
+  /* ---- table ---- */
+  table {
+    width: 100%; border-collapse: collapse; font-size: 8.5pt; margin-bottom: 12pt;
+    border: 1pt solid var(--rule);
+  }
+  th, td { padding: 4pt 5pt; text-align: right; border-bottom: .5pt solid var(--rule); }
+  th {
+    background: var(--accent); color: #fff; font-weight: 700; font-size: 7.5pt;
+    letter-spacing: .5pt; text-transform: uppercase;
+  }
   th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
-  tr:last-child td { border-bottom: 1pt solid var(--accent); }
-  h2 { font-size: 9.5pt; margin: 0 0 4pt; color: var(--accent); text-transform: uppercase;
-       letter-spacing: 0.4pt; }
-  ul { margin: 0; padding-left: 14pt; }
-  li { font-size: 8pt; color: #333; margin-bottom: 2.5pt; }
-  footer { margin-top: 10pt; padding-top: 5pt; border-top: 0.5pt solid var(--rule);
-           font-size: 7.5pt; color: var(--muted); }
-  .gap { color: #a11; font-style: italic; }
+  tbody tr:nth-child(even) td { background: #f6f9fc; }
+  tbody tr:last-child td { border-bottom: 1pt solid var(--accent); }
+  td.up { color: var(--up); font-weight: 600; }
+  td.down { color: var(--down); font-weight: 600; }
+  td.flat { color: var(--flat); }
+  tr.gap-row td { color: var(--gap-fg); font-style: italic; }
+
+  /* ---- caveats ---- */
+  h2 {
+    font-size: 9.5pt; margin: 0 0 5pt; color: var(--accent);
+    text-transform: uppercase; letter-spacing: .8pt;
+    border-left: 3pt solid var(--gold); padding-left: 6pt;
+  }
+  ul { margin: 0 0 8pt; padding-left: 15pt; }
+  li { font-size: 8pt; color: #333d47; margin-bottom: 3pt; }
+
+  .note_block { margin-bottom: 8pt; }
+
+  footer {
+    margin-top: 10pt; padding: 7pt 14pt; border-top: 2pt solid var(--accent);
+    font-size: 7.5pt; color: var(--muted); background: #f6f9fc;
+  }
+
+  .gap { color: var(--gap-fg); font-style: italic; }
+
+  @media print {
+    body { background: #fff; padding: 0; }
+    .page { box-shadow: none; max-width: none; }
+  }
 </style>
 </head>
 <body>
+<div class="page">
 <header>
+  <div class="kicker">$kicker</div>
   <h1>$h1</h1>
   <div class="subtitle">$subtitle</div>
 </header>
 
-<div class="verdict">$headline</div>
+<main>
+<div class="verdict">
+  <span class="verdict-tag">$verdict_tag</span>
+  <div>$headline</div>
+</div>
+
+$kpi_block
 
 $chart_block
 
@@ -54,7 +183,9 @@ $limitations
 </ul>
 
 $note_block
+</main>
 
 <footer>$footer</footer>
+</div>
 </body>
 </html>

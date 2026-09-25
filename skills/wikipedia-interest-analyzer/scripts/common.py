@@ -71,6 +71,7 @@ __all__ = [
     "REQUEST_DELAY_SECONDS",
     "MAX_ATTEMPTS",
     "BACKOFF_SECONDS",
+    "SERIES_COLOURS",
     # leaf utilities
     "clear_cache",
     "clip",
@@ -130,6 +131,11 @@ def _cache_dir_from_env() -> Path:
 
 
 CACHE_DIR = _cache_dir_from_env()
+
+# Distinct, colour-blind-safe ordering; extras fall back to the default cycle.
+# One source of truth so a language is the *same* colour in the chart, in the
+# report's sparklines and on its KPI tiles (index = position in the payload).
+SERIES_COLOURS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
 
 # The numeric rate limit was deliberately never measured. Stay conservative:
 # one request at a time with a fixed gap, and back off hard on 429/5xx.

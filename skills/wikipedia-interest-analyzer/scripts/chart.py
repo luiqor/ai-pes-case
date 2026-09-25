@@ -31,8 +31,8 @@ from payloads import AnalysisPayload  # noqa: E402
 
 FIGSIZE = (10, 5)
 DPI = 150
-# Distinct, colour-blind-safe ordering; extras fall back to the default cycle.
-COLOURS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+# Shared with the report (KPI tile accents, sparklines): see common.SERIES_COLOURS.
+COLOURS = common.SERIES_COLOURS
 
 
 def _tick_indices(count: int, max_ticks: int = 9) -> list[int]:
