@@ -5,7 +5,7 @@ Run manually whenever the golden data should be refreshed:
     uv run python tests/record_fixtures.py
 
 It drives the *production* code paths (``resolve.resolve`` + ``fetch.fetch_series``)
-with ``common.get_json`` wrapped to capture every URL actually requested, then
+with a recording client injected to capture every URL actually requested, then
 writes one fixture file per URL plus ``manifest.json`` mapping URL -> filename.
 Tests load by URL from that manifest, so a test can never silently hit the
 network: an unrecorded URL raises instead.
@@ -19,12 +19,14 @@ import re
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import common  # noqa: E402
 import fetch as fetch_mod  # noqa: E402
+import http_client  # noqa: E402
 import resolve as resolve_mod  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -59,29 +61,33 @@ def slug(url: str) -> str:
 def main() -> int:
     FIXTURES.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, str] = {}
-    original = common.get_json
 
-    def capturing(url: str, use_cache: bool | None = None):
-        body = original(url, use_cache=use_cache)
-        name = slug(url)
-        (FIXTURES / name).write_text(
-            json.dumps(body, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
-        manifest[url] = name
-        print(f"recorded {name}")
-        return body
+    class RecordingClient:
+        """Real transport that saves every body it receives as a fixture."""
 
-    common.get_json = capturing  # type: ignore[assignment]
+        def __init__(self) -> None:
+            self._inner = http_client.WikiClient()
 
+        def get_json(self, url: str) -> Any:
+            body = self._inner.get_json(url)
+            name = slug(url)
+            (FIXTURES / name).write_text(
+                json.dumps(body, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+            manifest[url] = name
+            print(f"recorded {name}")
+            return body
+
+    client = RecordingClient()
     study = dict(STUDY)
     study["resolution"] = resolve_mod.resolve(
-        study["topic"], study["languages"], search_language="en"
+        study["topic"], study["languages"], search_language="en", client=client
     )
-    series = fetch_mod.fetch_series(study, today=date(2026, 9, 24))
+    series = fetch_mod.fetch_series(study, today=date(2026, 9, 24), client=client)
 
     # A deliberately misspelled title, to pin the observed `missing` response
     # that makes an override fail loudly instead of reporting zero interest.
-    resolve_mod._confirm_titles("pl", ["Głódówka lecznicza"])
+    resolve_mod.confirm_titles("pl", ["Głódówka lecznicza"], client=client)
 
     common.write_json(FIXTURES / "series.expected.json", series)
     (FIXTURES / "manifest.json").write_text(

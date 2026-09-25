@@ -22,11 +22,21 @@ from __future__ import annotations
 
 import argparse
 from datetime import date
-from typing import Any
-
-import pandas as pd
 
 import common
+import pandas as pd
+from payloads import (
+    AnalysisPayload,
+    Comparison,
+    LanguageMetrics,
+    LanguageSeries,
+    SeasonalityProfile,
+    SeriesPayload,
+    TrendFit,
+    WindowRange,
+    WindowSplit,
+    YoyMetrics,
+)
 
 STRONG_SEASONALITY_RATIO = 2.0
 LOW_VOLUME_MEAN = 50.0
@@ -39,8 +49,16 @@ _LEVEL_ORDER = {"high": 0, "medium": 1, "low": 2}
 # --------------------------------------------------------------------------
 # Primitives
 # --------------------------------------------------------------------------
-def ols(values: list[float]) -> dict[str, float]:
-    """Least-squares fit of value against month index. Returns slope + R^2."""
+def ols(values: list[float]) -> TrendFit:
+    """Least-squares fit of value against month index. Returns slope + R^2.
+
+    Args:
+        values: The monthly series to fit (at least 3 points to mean much).
+
+    Returns:
+        A :class:`payloads.TrendFit`; degenerate inputs (too few points, or
+        no variance in the months) yield a zero slope rather than an error.
+    """
     n = len(values)
     if n < 3:
         return {"slope_per_month": 0.0, "intercept": 0.0, "r2": 0.0}
@@ -50,10 +68,14 @@ def ols(values: list[float]) -> dict[str, float]:
     sxx = sum((x - mean_x) ** 2 for x in xs)
     if sxx == 0:
         return {"slope_per_month": 0.0, "intercept": mean_y, "r2": 0.0}
-    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, values)) / sxx
+    slope = (
+        sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, values, strict=True)) / sxx
+    )
     intercept = mean_y - slope * mean_x
     sst = sum((y - mean_y) ** 2 for y in values)
-    sse = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, values))
+    sse = sum(
+        (y - (intercept + slope * x)) ** 2 for x, y in zip(xs, values, strict=True)
+    )
     r2 = 0.0 if sst == 0 else max(0.0, 1.0 - sse / sst)
     return {
         "slope_per_month": round(slope, 4),
@@ -63,23 +85,80 @@ def ols(values: list[float]) -> dict[str, float]:
 
 
 def pct_change(first: float, second: float) -> float | None:
+    """Percent change from ``first`` to ``second``, or ``None`` if undefined.
+
+    A move from zero has no defined percentage; returning ``None`` (rather
+    than ``inf`` or a guess) keeps downstream ranking honest.
+
+    Args:
+        first: Baseline value (the first half's total).
+        second: Value compared against the baseline (the second half).
+
+    Returns:
+        Rounded percentage, or ``None`` when ``first`` is zero.
+    """
     if first == 0:
         return None
     return round((second - first) / first * 100.0, 2)
 
 
 def direction(pct: float | None) -> int:
-    """-1 / 0 / +1, treating moves under FLAT_TOLERANCE_PCT as flat."""
+    """-1 / 0 / +1, treating moves under FLAT_TOLERANCE_PCT as flat.
+
+    Args:
+        pct: A percentage move, or ``None`` (counts as no direction).
+
+    Returns:
+        ``1`` up, ``-1`` down, ``0`` flat or undetermined.
+    """
     if pct is None or abs(pct) < FLAT_TOLERANCE_PCT:
         return 0
     return 1 if pct > 0 else -1
 
 
-def split_windows(labels: list[str]) -> dict[str, Any]:
+def _growth_share_sort_key(item: tuple[str, LanguageMetrics]) -> float:
+    """Sort key for the by-growth ranking: share growth, best first.
+
+    Languages whose YoY share growth is missing sort to the bottom rather
+    than crashing ``sorted`` on ``None`` (the floor of -999 is below any
+    reachable percentage, since non-negative views can fall at most -100%).
+    """
+    share_pct = item[1]["yoy"].get("share_pct")
+    return share_pct if share_pct is not None else -999.0
+
+
+def _rank_by_growth(
+    metrics: dict[str, LanguageMetrics],
+) -> list[tuple[str, LanguageMetrics]]:
+    """The by-growth ranking: languages with YoY data, best share growth first.
+
+    The **one** implementation shared by the headline verdict and
+    ``comparison.by_growth_share_pct``: ranking the same data twice with two
+    different keys could let the sentence and the table disagree.
+    """
+    return sorted(
+        (
+            (language, metric)
+            for language, metric in metrics.items()
+            if metric["yoy"].get("available")
+        ),
+        key=_growth_share_sort_key,
+        reverse=True,
+    )
+
+
+def split_windows(labels: list[str]) -> WindowSplit:
     """Split into two equal halves for a year-over-year style comparison.
 
     For an odd number of months the middle month is dropped so that both halves
     still cover identical calendar months (e.g. Oct-Aug vs Oct-Aug).
+
+    Args:
+        labels: The window's month labels, chronological.
+
+    Returns:
+        A :class:`payloads.WindowSplit`; when the window is too short only
+        ``available`` (false) and a ``reason`` are present.
     """
     n = len(labels)
     k = n // 2
@@ -101,8 +180,18 @@ def split_windows(labels: list[str]) -> dict[str, Any]:
     }
 
 
-def seasonality_profile(labels: list[str], values: list[int]) -> dict[str, Any]:
-    """Mean views per calendar month, plus a peak/overall dominance ratio."""
+def seasonality_profile(labels: list[str], values: list[int]) -> SeasonalityProfile:
+    """Mean views per calendar month, plus a peak/overall dominance ratio.
+
+    Args:
+        labels: Month labels (``YYYY-MM``), chronological.
+        values: Views for each month, aligned with ``labels``.
+
+    Returns:
+        A :class:`payloads.SeasonalityProfile`. With under 12 months the
+        profile is unavailable (``reason`` explains why); under 24 months it
+        is measured but marked ``reliable: false`` (less than two cycles).
+    """
     if len(labels) < 12:
         return {
             "available": False,
@@ -113,7 +202,9 @@ def seasonality_profile(labels: list[str], values: list[int]) -> dict[str, Any]:
         {"month": pd.to_datetime([f"{label}-01" for label in labels]), "views": values}
     )
     grouped = frame.groupby(frame["month"].dt.month)["views"].mean()
-    profile = {int(month): round(float(mean), 1) for month, mean in grouped.items()}
+    profile = {
+        int(str(month)): round(float(mean), 1) for month, mean in grouped.items()
+    }
 
     overall = sum(values) / len(values)
     peak_month = max(profile, key=lambda m: profile[m])
@@ -148,6 +239,21 @@ def grade(
     Starts at "high" and downgrades; every downgrade is reported so the reader
     can see exactly why a grade was (not) given. Thresholds are design
     parameters documented in references/methods.md.
+
+    Args:
+        months: Window length in months.
+        aligned: Whether the two halves cover the same calendar months.
+        direction_agrees: Whether absolute and normalised moves point the
+            same way (a disagreement means the move is traffic-driven).
+        r2_share: R^2 of the linear fit on the normalised share.
+        strong_seasonality: A reliable, >=2x seasonal peak was measured.
+        possible_seasonality: A >=2x peak was seen but the window is too
+            short to call it reliable (reported, never graded).
+        mean_views: Mean monthly article views (low volume is noisy).
+
+    Returns:
+        ``(grade, reasons)`` -- one of ``high``/``medium``/``low`` plus the
+        human-readable justification, best reason first for ``high``.
     """
     level = "high"
     reasons: list[str] = []
@@ -206,21 +312,29 @@ def grade(
 # --------------------------------------------------------------------------
 # Per-language metrics
 # --------------------------------------------------------------------------
-def analyze_language(language: str, item: dict[str, Any]) -> dict[str, Any]:
+def analyze_language(language: str, item: LanguageSeries) -> LanguageMetrics:
+    """Compute every metric for one language's series.
+
+    Args:
+        language: Language code (also the key in the output metrics map).
+        item: One entry of ``series.json`` (labels + both view series).
+
+    Returns:
+        The :class:`payloads.LanguageMetrics` record: totals, share, growth,
+        trend fits, seasonality, flags and the graded confidence.
+    """
     labels: list[str] = item["labels"]
     article: list[int] = item["article_views"]
     project: list[int] = item["project_views"]
     months = len(labels)
 
-    share = [
-        (a / p * 1e6) if p else 0.0 for a, p in zip(article, project)
-    ]
+    share = [(a / p * 1e6) if p else 0.0 for a, p in zip(article, project, strict=True)]
     article_total = float(sum(article))
     project_total = float(sum(project))
 
     # --- growth: first half vs second half ----------------------------------
     split = split_windows(labels)
-    yoy: dict[str, Any] = {"available": False}
+    yoy: YoyMetrics = {"available": False}
     article_pct: float | None = None
     share_pct: float | None = None
     aligned = True
@@ -231,7 +345,9 @@ def analyze_language(language: str, item: dict[str, Any]) -> dict[str, Any]:
         first_project = float(sum(project[:k]))
         second_project = float(sum(project[months - k :]))
         first_share = (first_article / first_project * 1e6) if first_project else 0.0
-        second_share = (second_article / second_project * 1e6) if second_project else 0.0
+        second_share = (
+            (second_article / second_project * 1e6) if second_project else 0.0
+        )
 
         article_pct = pct_change(first_article, second_article)
         share_pct = pct_change(first_share, second_share)
@@ -290,7 +406,9 @@ def analyze_language(language: str, item: dict[str, Any]) -> dict[str, Any]:
         "months": months,
         "article_total": int(article_total),
         "project_total": int(project_total),
-        "share_ppm": round(article_total / project_total * 1e6, 4) if project_total else 0.0,
+        "share_ppm": round(article_total / project_total * 1e6, 4)
+        if project_total
+        else 0.0,
         "mean_monthly_views": round(mean_views, 1),
         "yoy": yoy,
         "trend": {"article": trend_article, "share": trend_share},
@@ -310,20 +428,30 @@ def analyze_language(language: str, item: dict[str, Any]) -> dict[str, Any]:
 # Composition
 # --------------------------------------------------------------------------
 def build_headline(
-    topic: str, window: dict[str, Any], metrics: dict[str, dict[str, Any]], gaps: list[str]
+    topic: str,
+    window: WindowRange,
+    metrics: dict[str, LanguageMetrics],
+    gaps: list[str],
 ) -> str:
-    span = f"{window['since']}..{window['until']}"
-    with_yoy = {
-        lang: m for lang, m in metrics.items() if m["yoy"].get("available")
-    }
-    if not with_yoy:
-        return f"No language edition has enough data to assess interest in {topic!r} over {span}."
+    """Write the one-sentence verdict: growth per language plus every grade.
 
-    ranked = sorted(
-        with_yoy.items(),
-        key=lambda kv: (kv[1]["yoy"]["share_pct"] if kv[1]["yoy"]["share_pct"] is not None else -999),
-        reverse=True,
-    )
+    Args:
+        topic: The study topic, quoted into the sentence.
+        window: Resolved window (used for the ``since..until`` span).
+        metrics: Per-language metrics, keyed by language code.
+        gaps: Languages with no article at all (appended as unmeasurable).
+
+    Returns:
+        A single self-contained sentence; the report prints it verbatim.
+    """
+    span = f"{window['since']}..{window['until']}"
+    ranked = _rank_by_growth(metrics)
+    if not ranked:
+        return (
+            f"No language edition has enough data to assess interest "
+            f"in {topic!r} over {span}."
+        )
+
     parts = []
     for lang, m in ranked:
         share_pct = m["yoy"]["share_pct"]
@@ -352,8 +480,25 @@ def build_headline(
 
 
 def build_limitations(
-    payload: dict[str, Any], metrics: dict[str, dict[str, Any]], gaps: list[str]
+    payload: SeriesPayload,
+    metrics: dict[str, LanguageMetrics],
+    gaps: list[str],
 ) -> list[str]:
+    """Assemble every caveat the reader must weigh, in report order.
+
+    Covers what pageviews cannot say, the single-article proxy, the request
+    parameters used, the growth definition, coverage gaps, manual
+    substitutions and any seasonal signal.
+
+    Args:
+        payload: The ``series.json`` payload (parameters + series detail).
+        metrics: Per-language metrics for the seasonal flags.
+        gaps: Languages with no article for this topic.
+
+    Returns:
+        Limitations, most important first; the report de-duplicates them
+        against warnings and assumptions.
+    """
     parameters = payload["parameters"]
     limitations = [
         "Pageviews measure article reads, not willingness to pay -- treat this as "
@@ -374,8 +519,11 @@ def build_limitations(
         )
     substituted = [
         f"{language} = '{item['article_title']}' ("
-        + ("no native article exists for this topic" if item.get("native_gap")
-           else "chosen explicitly")
+        + (
+            "no native article exists for this topic"
+            if item.get("native_gap")
+            else "chosen explicitly"
+        )
         + ")"
         for language, item in payload["series"].items()
         if item.get("resolved_via") == "override"
@@ -396,13 +544,30 @@ def build_limitations(
     ]
     if seasonal:
         limitations.append(
-            "Seasonal signal detected -- " + "; ".join(seasonal)
+            "Seasonal signal detected -- "
+            + "; ".join(seasonal)
             + ". A single seasonal cycle can dominate a short window."
         )
     return limitations
 
 
-def analyze(payload: dict[str, Any]) -> dict[str, Any]:
+def analyze(payload: SeriesPayload) -> AnalysisPayload:
+    """Turn ``series.json`` into ``analysis.json``.
+
+    Runs every per-language metric, assembles the cross-language rankings,
+    and attaches the headline plus the assumptions/limitations that must
+    travel with any claim made from these numbers.
+
+    Args:
+        payload: The ``series.json`` structure from ``fetch.py``.
+
+    Returns:
+        The :class:`payloads.AnalysisPayload` written to ``analysis.json``.
+
+    Raises:
+        KeyError: If the payload lacks a required section -- in practice only
+        for a hand-edited file (the read boundary validates it first).
+    """
     metrics = {
         language: analyze_language(language, item)
         for language, item in payload["series"].items()
@@ -413,7 +578,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     for language, item in payload["series"].items():
         share = [
             (a / p * 1e6) if p else 0.0
-            for a, p in zip(item["article_views"], item["project_views"])
+            for a, p in zip(item["article_views"], item["project_views"], strict=True)
         ]
         metrics[language]["series"] = {
             "labels": item["labels"],
@@ -423,7 +588,8 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
     ordered = sorted(metrics.items(), key=lambda kv: kv[1]["share_ppm"], reverse=True)
-    comparison = {
+    growth_ranked = _rank_by_growth(metrics)
+    comparison: Comparison = {
         "by_share_ppm": [
             {"language": lang, "share_ppm": m["share_ppm"]} for lang, m in ordered
         ],
@@ -433,36 +599,10 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
                 "share_pct": m["yoy"]["share_pct"],
                 "article_pct": m["yoy"]["article_pct"],
             }
-            for lang, m in sorted(
-                metrics.items(),
-                key=lambda kv: (
-                    kv[1]["yoy"]["share_pct"]
-                    if kv[1]["yoy"].get("share_pct") is not None
-                    else -999
-                ),
-                reverse=True,
-            )
-            if m["yoy"].get("available")
+            for lang, m in growth_ranked
         ],
         "highest_share": ordered[0][0] if ordered else None,
-        "fastest_growth": (
-            next(
-                (
-                    lang
-                    for lang, m in sorted(
-                        metrics.items(),
-                        key=lambda kv: (
-                            kv[1]["yoy"]["share_pct"]
-                            if kv[1]["yoy"].get("share_pct") is not None
-                            else -999
-                        ),
-                        reverse=True,
-                    )
-                    if m["yoy"].get("available")
-                ),
-                None,
-            )
-        ),
+        "fastest_growth": growth_ranked[0][0] if growth_ranked else None,
     }
 
     return {
@@ -490,6 +630,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the ``analyze.py`` command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--series", default="series.json", help="input from fetch.py")
     parser.add_argument("--out", default="analysis.json", help="output path")
@@ -497,6 +638,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Read ``series.json``, write ``analysis.json``, print the headline."""
     common.configure_console()
     args = build_parser().parse_args(argv)
     payload = common.read_json(args.series)

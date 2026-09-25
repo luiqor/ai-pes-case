@@ -25,9 +25,13 @@ from pathlib import Path
 from typing import Any
 
 import common
+import http_client
+from payloads import Resolution
 
 
-def _search_concept(topic: str, language: str, limit: int) -> dict[str, Any]:
+def _search_concept(
+    topic: str, language: str, limit: int, *, client: common.JsonFetcher
+) -> dict[str, Any]:
     """Wikidata entity search. Returns the raw payload so callers can report
     the full candidate list rather than silently taking the first hit."""
     return common.wikidata_api(
@@ -37,11 +41,15 @@ def _search_concept(topic: str, language: str, limit: int) -> dict[str, Any]:
             "language": language,
             "type": "item",
             "limit": str(limit),
-        }
+        },
+        client=client,
     )
 
 
-def _entity(qid: str, languages: list[str]) -> dict[str, Any]:
+def _entity(
+    qid: str, languages: list[str], *, client: common.JsonFetcher
+) -> dict[str, Any]:
+    """Fetch one Wikidata item's labels, descriptions and sitelinks (raw)."""
     wanted = sorted({f"{lang}wiki" for lang in languages})
     return common.wikidata_api(
         {
@@ -50,21 +58,40 @@ def _entity(qid: str, languages: list[str]) -> dict[str, Any]:
             "props": "labels|descriptions|sitelinks",
             "languages": "|".join(sorted(languages)),
             "sitefilter": "|".join(wanted),
-        }
+        },
+        client=client,
     )
 
 
-def _confirm_titles(language: str, titles: list[str]) -> dict[str, Any]:
-    """Batch ``prop=info`` lookup. Returns the raw query payload."""
+def confirm_titles(
+    language: str, titles: list[str], *, client: common.JsonFetcher
+) -> dict[str, Any]:
+    """Batch ``prop=info`` lookup (the only way a title is ever trusted).
+
+    Args:
+        language: Language edition whose wiki should answer.
+        titles: Candidate titles, pipe-joined into a single query.
+        client: Injected transport (see :func:`common.action_api`).
+
+    Returns:
+        The raw ``action=query&prop=info`` payload for ``page_exists``.
+
+    Raises:
+        ApiError: If the wiki request fails (``kind`` classifies the case).
+    """
     if not titles:
         return {}
     return common.action_api(
         common.project_for(language),
         {"action": "query", "titles": "|".join(titles), "prop": "info"},
+        client=client,
     )
 
 
-def _search_wiki(language: str, term: str, limit: int) -> dict[str, Any]:
+def _search_wiki(
+    language: str, term: str, limit: int, *, client: common.JsonFetcher
+) -> dict[str, Any]:
+    """Full-text search of one wiki's main namespace (raw payload)."""
     return common.action_api(
         common.project_for(language),
         {
@@ -74,11 +101,17 @@ def _search_wiki(language: str, term: str, limit: int) -> dict[str, Any]:
             "srnamespace": "0",
             "srlimit": str(limit),
         },
+        client=client,
     )
 
 
 def _confirmed_candidates(
-    language: str, term: str, limit: int, warnings: list[str]
+    language: str,
+    term: str,
+    limit: int,
+    warnings: list[str],
+    *,
+    client: common.JsonFetcher,
 ) -> list[dict[str, Any]]:
     """Search the wiki, then drop any hit that no longer exists.
 
@@ -87,12 +120,16 @@ def _confirmed_candidates(
     """
     if not term:
         return []
-    hits = _search_wiki(language, term, limit * 3).get("query", {}).get("search", [])
+    hits = (
+        _search_wiki(language, term, limit * 3, client=client)
+        .get("query", {})
+        .get("search", [])
+    )
     if not hits:
         return []
 
     titles = [hit.get("title", "") for hit in hits if hit.get("title")]
-    info = _confirm_titles(language, titles)
+    info = confirm_titles(language, titles, client=client)
 
     out: list[dict[str, Any]] = []
     for hit in hits:
@@ -120,23 +157,47 @@ def resolve(
     topic: str,
     languages: list[str],
     *,
+    client: common.JsonFetcher | None = None,
     qid: str | None = None,
     search_language: str = "en",
     candidate_limit: int = 3,
     search_limit: int = 5,
-) -> dict[str, Any]:
+) -> Resolution:
     """Resolve ``topic`` into one article per language edition.
 
     Returns a dict containing ``articles`` (title-or-null per language),
     ``gaps`` (languages with no article) and ``candidates`` (nearest known
     articles for those gaps -- for the user to choose from, never auto-picked).
+
+    Args:
+        topic: Natural-language topic, e.g. ``"intermittent fasting"``.
+        languages: Language editions to resolve, e.g. ``["pl", "cs"]``.
+        client: Injected transport. ``None`` builds one for this call --
+            callers issuing several operations (e.g. ``run.py all``) should
+            pass a single shared client instead, so one politeness cadence
+            spans the whole run (``http_client.default_client()``).
+        qid: Skip the concept search and use this Wikidata item directly.
+        search_language: Language of the Wikidata concept search (and of the
+            label/description reported back).
+        candidate_limit: Candidates offered per gap language.
+        search_limit: Wikidata search hits reported for re-picking.
+
+    Returns:
+        The resolution payload stored in the manifest (see
+        :class:`payloads.Resolution` for its shape).
+
+    Raises:
+        ApiError: ``kind="not_found"`` when the concept search matches
+            nothing, or the requested Q-id does not exist.
     """
+    if client is None:
+        client = http_client.default_client()
     warnings: list[str] = []
 
     # --- 1. concept -> Q-item -------------------------------------------------
     search_hits: list[dict[str, Any]] = []
     if qid is None:
-        payload = _search_concept(topic, search_language, search_limit)
+        payload = _search_concept(topic, search_language, search_limit, client=client)
         search_hits = [
             {
                 "id": hit.get("id"),
@@ -155,12 +216,10 @@ def resolve(
 
     # --- 2. Q-item -> labels + sitelinks -------------------------------------
     label_langs = sorted(set(languages) | {search_language})
-    entity_payload = _entity(qid, label_langs)
+    entity_payload = _entity(qid, label_langs, client=client)
     entity = entity_payload.get("entities", {}).get(qid) or {}
     if not entity or entity.get("missing") is not None:
-        raise common.ApiError(
-            f"Wikidata entity {qid} does not exist", kind="not_found"
-        )
+        raise common.ApiError(f"Wikidata entity {qid} does not exist", kind="not_found")
 
     labels = {
         lang: data.get("value")
@@ -175,11 +234,11 @@ def resolve(
     sitelinks = entity.get("sitelinks") or {}
 
     # --- 3. sitelinks -> titles (confirmed) ----------------------------------
-    titles_by_lang: dict[str, str] = {}
-    for language in languages:
-        raw = (sitelinks.get(f"{language}wiki") or {}).get("title")
-        if raw:
-            titles_by_lang[language] = raw
+    titles_by_lang: dict[str, str] = {
+        language: title
+        for language in languages
+        if (title := (sitelinks.get(f"{language}wiki") or {}).get("title"))
+    }
 
     articles: dict[str, dict[str, Any] | None] = {}
     gaps: list[str] = []
@@ -189,7 +248,7 @@ def resolve(
             articles[language] = None
             gaps.append(language)
             continue
-        info = _confirm_titles(language, [title])
+        info = confirm_titles(language, [title], client=client)
         exists, pageid = common.page_exists(info, title)
         if not exists:
             warnings.append(
@@ -199,14 +258,18 @@ def resolve(
             articles[language] = None
             gaps.append(language)
         else:
-            articles[language] = {"title": title, "pageid": pageid, "source": "sitelink"}
+            articles[language] = {
+                "title": title,
+                "pageid": pageid,
+                "source": "sitelink",
+            }
 
     # --- 4. gaps -> nearest candidates (reported, never substituted) ----------
     candidates: dict[str, list[dict[str, Any]]] = {}
     for language in gaps:
         term = labels.get(language) or labels.get(search_language) or topic
         candidates[language] = _confirmed_candidates(
-            language, term, candidate_limit, warnings
+            language, term, candidate_limit, warnings, client=client
         )
 
     return {
@@ -226,6 +289,19 @@ def resolve(
 
 
 def parse_languages(raw: str) -> list[str]:
+    """Parse ``"pl,cs"`` into validated language codes.
+
+    Args:
+        raw: Comma-separated codes from ``--langs`` (case-insensitive).
+
+    Returns:
+        The normalised codes in the order given (duplicates are preserved;
+        the caller's manifest reflects exactly what was typed).
+
+    Raises:
+        argparse.ArgumentTypeError: On an empty list or a code that could not
+            name a Wikipedia edition (the message is argparse-ready).
+    """
     languages = [part.strip().lower() for part in raw.split(",") if part.strip()]
     if not languages:
         raise argparse.ArgumentTypeError("at least one language code is required")
@@ -238,40 +314,65 @@ def parse_languages(raw: str) -> list[str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the ``resolve.py`` command-line parser (one line per option)."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--topic", help="natural-language topic, e.g. 'intermittent fasting'")
-    parser.add_argument("--langs", type=parse_languages, required=True,
-                        help="comma-separated language codes, e.g. pl,cs,uk")
-    parser.add_argument("--qid", help="skip topic search and use this Wikidata id (e.g. Q1666254)")
-    parser.add_argument("--search-lang", default="en",
-                        help="language for the Wikidata concept search (default: en)")
-    parser.add_argument("--candidates", type=int, default=3,
-                        help="candidate articles to offer per gap language (default: 3)")
-    parser.add_argument("--limit", type=int, default=5,
-                        help="Wikidata search hits to report (default: 5)")
+    parser.add_argument(
+        "--topic", help="natural-language topic, e.g. 'intermittent fasting'"
+    )
+    parser.add_argument(
+        "--langs",
+        type=parse_languages,
+        required=True,
+        help="comma-separated language codes, e.g. pl,cs,uk",
+    )
+    parser.add_argument(
+        "--qid", help="skip topic search and use this Wikidata id (e.g. Q1666254)"
+    )
+    parser.add_argument(
+        "--search-lang",
+        default="en",
+        help="language for the Wikidata concept search (default: en)",
+    )
+    parser.add_argument(
+        "--candidates",
+        type=int,
+        default=3,
+        help="candidate articles to offer per gap language (default: 3)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Wikidata search hits to report (default: 5)",
+    )
     parser.add_argument("--out", help="write JSON here instead of stdout")
-    parser.add_argument("--no-cache", action="store_true", help="ignore cached responses")
+    parser.add_argument(
+        "--no-cache", action="store_true", help="ignore cached responses"
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the resolver as a CLI; writes JSON to ``--out`` or stdout."""
     common.configure_console()
     args = build_parser().parse_args(argv)
     if not args.topic and not args.qid:
         print("error: provide --topic or --qid", file=sys.stderr)
         return 2
-    if args.no_cache:
-        common.set_cache_enabled(False)
 
     try:
-        result = resolve(
-            args.topic or args.qid,
-            args.langs,
-            qid=args.qid,
-            search_language=args.search_lang,
-            candidate_limit=args.candidates,
-            search_limit=args.limit,
-        )
+        # Composition root: one client per invocation, so its session, cache
+        # switch and politeness cadence cover every request of this run.
+        with http_client.default_client(cache_enabled=not args.no_cache) as client:
+            result = resolve(
+                args.topic or args.qid,
+                args.langs,
+                client=client,
+                qid=args.qid,
+                search_language=args.search_lang,
+                candidate_limit=args.candidates,
+                search_limit=args.limit,
+            )
     except common.ApiError as exc:
         print(f"error [{exc.kind}]: {exc}", file=sys.stderr)
         return 1

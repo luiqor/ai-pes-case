@@ -12,7 +12,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 import report as report_mod
 
 
@@ -161,7 +160,8 @@ def test_pdf_fits_the_extra_warning_bullet_and_stays_on_one_page(
 def test_caveat_items_state_the_growth_definition_once(golden_analysis):
     """Both builders used to state the growth definition, wasting page space."""
     growth = [
-        item for item in report_mod.caveat_items(golden_analysis)
+        item
+        for item in report_mod.caveat_items(golden_analysis)
         if "second half" in item
     ]
 
@@ -172,9 +172,7 @@ def test_html_states_the_growth_definition_once(golden_analysis, tmp_path):
     out = tmp_path / "report.html"
     report_mod.render_html(golden_analysis, None, out)
 
-    assert out.read_text(encoding="utf-8").count(
-        "Growth compares the second half"
-    ) == 1
+    assert out.read_text(encoding="utf-8").count("Growth compares the second half") == 1
 
 
 def test_report_and_analysis_share_one_caveat_source():
@@ -210,7 +208,9 @@ def test_wrap_breaks_on_word_boundaries_and_never_exceeds_the_width():
     assert len(lines) > 1
     assert " ".join(lines) == text, "wrapping must not lose or reorder words"
     for line in lines:
-        assert report_mod.pdfmetrics.stringWidth(line, report_mod.FONT, 9.0) <= max_width
+        assert (
+            report_mod.pdfmetrics.stringWidth(line, report_mod.FONT, 9.0) <= max_width
+        )
 
 
 def test_accented_title_is_measured_by_the_unicode_font_not_helvetica():
@@ -220,12 +220,8 @@ def test_accented_title_is_measured_by_the_unicode_font_not_helvetica():
     The check is unconditional, so a font rename fails loudly instead of
     quietly skipping the only assertion with teeth.
     """
-    width = report_mod.pdfmetrics.stringWidth(
-        "Přerušovaný půst", report_mod.FONT, 9.0
-    )
-    helvetica = report_mod.pdfmetrics.stringWidth(
-        "Přerušovaný půst", "Helvetica", 9.0
-    )
+    width = report_mod.pdfmetrics.stringWidth("Přerušovaný půst", report_mod.FONT, 9.0)
+    helvetica = report_mod.pdfmetrics.stringWidth("Přerušovaný půst", "Helvetica", 9.0)
 
     assert width != helvetica
 

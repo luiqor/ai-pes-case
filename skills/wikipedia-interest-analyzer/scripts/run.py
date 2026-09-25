@@ -7,9 +7,9 @@ nothing.
 
     run.py init --topic "intermittent fasting" --langs pl,cs
     run.py resolve                      # concept -> article per language, then stop
-    run.py status                       # what is resolved, what is a gap, which candidates
+    run.py status                       # resolved? gaps? runner-up concepts
     run.py all --out reports/           # resolve -> fetch -> analyze -> chart -> report
-    run.py override --lang pl --title "Post"   # deliberate substitution, only ever explicit
+    run.py override --lang pl --title "Post"   # deliberate substitution
     run.py all --out reports/           # rerun; cached responses are reused
 
 Outputs (study.json is the manifest; series.json, analysis.json, chart.*,
@@ -24,14 +24,21 @@ import argparse
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable
 
 import analyze as analyze_mod
 import chart as chart_mod
 import common
 import fetch as fetch_mod
+import http_client
 import report as report_mod
 import resolve as resolve_mod
+from payloads import (
+    AnalysisPayload,
+    SeriesPayload,
+    StudyManifest,
+    StudyWindow,
+    load_study_manifest,
+)
 
 STAGES = ("resolve", "fetch", "analyze", "chart", "report")
 
@@ -44,77 +51,86 @@ SUBCOMMANDS = {"init", "all", "resolve", "status", "override", "clear-cache"}
 # --------------------------------------------------------------------------
 # Manifest helpers
 # --------------------------------------------------------------------------
-def _load(study_path: Path) -> dict[str, Any]:
-    if not study_path.is_file():
-        raise SystemExit(
-            f"error: no study manifest at {study_path}\n"
-            'Create one with:  run.py init --topic "..." --langs pl,cs'
-        )
-    return common.read_json(study_path)
+def _load(study_path: Path) -> StudyManifest:
+    """Read and validate the study manifest (the shared boundary check).
+
+    Raises:
+        SystemExit: The manifest is missing, unreadable, or fails the schema
+            in ``payloads`` -- the message names the offending fields.
+    """
+    return load_study_manifest(study_path)
 
 
-def _save(study_path: Path, study: dict[str, Any]) -> None:
+def _save(study_path: Path, study: StudyManifest) -> None:
+    """Persist the manifest (pretty UTF-8 JSON, parents created)."""
     common.write_json(study_path, study)
 
 
-def _window_info(study: dict[str, Any]) -> tuple[str, list[str]]:
+def _window_info(study: StudyManifest) -> tuple[str, list[str]]:
     """``(human-readable window, warnings)`` -- always the real dates.
 
     An unset window means "the last N complete months", which is useless to read
     as ``(default)`` -- resolve it (pure date maths, no network) so ``init`` and
     ``status`` always show the dates the run will actually use, plus anything
     that would silently weaken the study (a clamp, or an unalignable window).
+
+    An *invalid* window is deliberately not caught here: ``resolve_window``
+    exits with the real reason, and ``main()`` prints it, so a broken manifest
+    surfaces as an error instead of a plausible-looking ``(default)`` label.
     """
-    window = study.get("window") or {}
-    try:
-        since, until, warnings = fetch_mod.resolve_window(study, date.today())
-    except SystemExit:
-        return (
-            f"{window.get('since', '(default)')} .. "
-            f"{window.get('until', '(default)')}",
-            [],
-        )
+    since, until, warnings = fetch_mod.resolve_window(study, date.today())
     return f"{since} .. {until}", warnings
 
 
-def _print_window(study: dict[str, Any], indent: str = "") -> None:
-    label, warnings = _window_info(study)
+def _print_window(label: str, warnings: list[str], indent: str = "") -> None:
+    """Print the resolved window; each warning goes to stderr with indent."""
     print(f"{indent}window:    {label}")
     for warning in warnings:
         print(f"{indent}warning:   {warning}", file=sys.stderr)
 
 
 def cmd_init(args: argparse.Namespace) -> None:
+    """Create a new study manifest after validating the requested window.
+
+    Raises:
+        SystemExit: If the manifest exists (without ``--force``) or the
+            window is invalid; no file is written in either case.
+    """
     study_path = Path(args.study)
     if study_path.exists() and not args.force:
         raise SystemExit(
             f"error: {study_path} already exists (use --force to overwrite)"
         )
     languages = resolve_mod.parse_languages(args.langs)
-    window: dict[str, str] = {}
+    window: StudyWindow = {}
     if args.since:
         window["since"] = args.since
     if args.until:
         window["until"] = args.until
 
-    study = {
+    study: StudyManifest = {
         "version": 1,
         "topic": args.topic,
         "languages": languages,
-        "window": window or {},
+        "window": window,
         "access": common.DEFAULT_ACCESS,
         "agent": common.DEFAULT_AGENT,
         "granularity": "monthly",
         "overrides": {},
         "resolution": None,
     }
+    # Resolve (and thereby validate) the window *before* writing anything: a
+    # rejected window must leave no manifest behind to confuse the next run.
+    label, warnings = _window_info(study)
     _save(study_path, study)
     print(f"wrote {study_path}")
     print(f"  topic:     {args.topic}")
     print(f"  languages: {', '.join(languages)}")
-    _print_window(study, indent="  ")
+    _print_window(label, warnings, indent="  ")
     if not window:
-        print(f"             (default: last {fetch_mod.DEFAULT_MONTHS} complete months)")
+        print(
+            f"             (default: last {fetch_mod.DEFAULT_MONTHS} complete months)"
+        )
     print(f"Next: run.py resolve --study {study_path}")
     print(f"Then: run.py all --study {study_path} --out <dir>")
 
@@ -122,10 +138,32 @@ def cmd_init(args: argparse.Namespace) -> None:
 # --------------------------------------------------------------------------
 # Stages
 # --------------------------------------------------------------------------
-def stage_resolve(study: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+def stage_resolve(
+    study: StudyManifest,
+    args: argparse.Namespace,
+    *,
+    client: common.JsonFetcher,
+) -> StudyManifest:
+    """Resolve the concept (Wikidata + per-language sitelinks) into the manifest.
+
+    Prints every article found and every gap with its candidates, then stores
+    the resolution in the manifest (the caller saves it).
+
+    Args:
+        study: Loaded manifest; ``resolution`` is written in place.
+        args: Parsed CLI args (uses ``qid`` and ``search_lang``).
+        client: The run's shared transport (see :func:`main`).
+
+    Returns:
+        The same manifest dict, now carrying ``resolution``.
+
+    Raises:
+        ApiError: If Wikidata/Wikipedia cannot be searched (see ``resolve``).
+    """
     resolution = resolve_mod.resolve(
         study["topic"],
         study["languages"],
+        client=client,
         qid=args.qid,
         search_language=args.search_lang,
     )
@@ -143,7 +181,7 @@ def stage_resolve(study: dict[str, Any], args: argparse.Namespace) -> dict[str, 
                     f"({common.clip(candidate['snippet'])})"
                 )
             print(
-                f'      to analyse one: run.py override --lang {language} '
+                f"      to analyse one: run.py override --lang {language} "
                 f'--title "<candidate>"'
             )
     for warning in resolution["warnings"]:
@@ -151,10 +189,33 @@ def stage_resolve(study: dict[str, Any], args: argparse.Namespace) -> dict[str, 
     return study
 
 
-def stage_fetch(study: dict[str, Any], out_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+def stage_fetch(
+    study: StudyManifest,
+    out_dir: Path,
+    args: argparse.Namespace,
+    *,
+    client: common.JsonFetcher,
+) -> SeriesPayload:
+    """Fetch both pageview series per language and write ``series.json``.
+
+    Args:
+        study: Manifest carrying a completed ``resolution``.
+        out_dir: Directory for the artifact (created by ``cmd_run``).
+        args: Parsed CLI args (unused here; kept for stage uniformity).
+        client: The run's shared transport (see :func:`main`).
+
+    Returns:
+        The :class:`payloads.SeriesPayload` that was written.
+
+    Raises:
+        SystemExit: When the study has not been resolved yet.
+        ApiError: For API failures beyond the retry budget.
+    """
     if not study.get("resolution"):
-        raise SystemExit("error: study has no resolution yet -- run 'run.py resolve' first")
-    payload = fetch_mod.fetch_series(study)
+        raise SystemExit(
+            "error: study has no resolution yet -- run 'run.py resolve' first"
+        )
+    payload = fetch_mod.fetch_series(study, client=client)
     path = out_dir / "series.json"
     common.write_json(path, payload)
     for language, item in payload["series"].items():
@@ -170,7 +231,18 @@ def stage_fetch(study: dict[str, Any], out_dir: Path, args: argparse.Namespace) 
     return payload
 
 
-def stage_analyze(out_dir: Path) -> dict[str, Any]:
+def stage_analyze(out_dir: Path) -> AnalysisPayload:
+    """Compute metrics from ``series.json`` and write ``analysis.json``.
+
+    Args:
+        out_dir: Directory holding the artifacts.
+
+    Returns:
+        The :class:`payloads.AnalysisPayload` that was written.
+
+    Raises:
+        SystemExit: When ``series.json`` is missing (fetch has not run).
+    """
     series_path = out_dir / "series.json"
     if not series_path.is_file():
         raise SystemExit(
@@ -184,21 +256,32 @@ def stage_analyze(out_dir: Path) -> dict[str, Any]:
     return analysis
 
 
-def stage_chart(analysis: dict[str, Any], out_dir: Path) -> dict[str, str]:
+def stage_chart(analysis: AnalysisPayload, out_dir: Path) -> dict[str, str]:
+    """Render the comparison chart as PNG and SVG inside ``out_dir``."""
     paths = chart_mod.render(analysis, out_dir / "chart")
     print(f"  wrote {paths['png']}")
     print(f"  wrote {paths['svg']}")
     return paths
 
 
-def stage_report(analysis: dict[str, Any], out_dir: Path) -> None:
+def stage_report(analysis: AnalysisPayload, out_dir: Path) -> None:
+    """Write ``report.html`` always and ``report.pdf`` when it fits one page.
+
+    Raises:
+        SystemExit: Code 1 when the PDF would overflow: the HTML is kept,
+            the partial PDF is deleted, and the reason is printed.
+    """
     chart_png = out_dir / "chart.png"
     html_path = out_dir / "report.html"
     pdf_path = out_dir / "report.pdf"
-    report_mod.render_html(analysis, chart_png if chart_png.is_file() else None, html_path)
+    report_mod.render_html(
+        analysis, chart_png if chart_png.is_file() else None, html_path
+    )
     print(f"  wrote {html_path}")
     try:
-        report_mod.render_pdf(analysis, chart_png if chart_png.is_file() else None, pdf_path)
+        report_mod.render_pdf(
+            analysis, chart_png if chart_png.is_file() else None, pdf_path
+        )
     except report_mod.ReportOverflow as exc:
         print(f"  error: {exc}", file=sys.stderr)
         print("  The HTML report was written; the PDF was not.", file=sys.stderr)
@@ -212,10 +295,12 @@ def stage_report(analysis: dict[str, Any], out_dir: Path) -> None:
 # Commands
 # --------------------------------------------------------------------------
 def cmd_status(args: argparse.Namespace) -> None:
+    """Print the manifest: topic, languages, window, resolution, candidates."""
     study = _load(Path(args.study))
     print(f"topic:     {study['topic']}")
     print(f"languages: {', '.join(study['languages'])}")
-    _print_window(study)
+    label, warnings = _window_info(study)
+    _print_window(label, warnings)
     if study.get("overrides"):
         for language, title in study["overrides"].items():
             print(f"override:  {language} = {title}")
@@ -246,6 +331,11 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 def cmd_override(args: argparse.Namespace) -> None:
+    """Record a deliberate article substitution in the manifest.
+
+    Raises:
+        SystemExit: When ``--lang`` is not one of the study's languages.
+    """
     study_path = Path(args.study)
     study = _load(study_path)
     if args.lang not in study["languages"]:
@@ -260,30 +350,40 @@ def cmd_override(args: argparse.Namespace) -> None:
 
 
 def cmd_clear_cache(args: argparse.Namespace) -> None:
+    """Delete every cached API response and report how many were removed."""
     removed = common.clear_cache()
     print(f"removed {removed} cached response(s) from {common.CACHE_DIR}")
 
 
-def cmd_run(args: argparse.Namespace) -> None:
+def cmd_run(args: argparse.Namespace, *, client: common.JsonFetcher) -> None:
+    """Run one stage (``--stage``) or the whole pipeline in order.
+
+    Each stage prints what it wrote; resolve results are saved back into the
+    manifest, while everything else lands in ``--out``. Failures stop the run
+    and are reported by :func:`main`.
+
+    Args:
+        args: Parsed CLI args (``study``, ``out``, ``stage``, ``no_cache``).
+        client: The run's shared transport -- built once in :func:`main` and
+            passed to every networked stage, so one politeness cadence spans
+            the whole run (``--no-cache`` is already applied to it).
+    """
     study_path = Path(args.study)
     # `resolve` writes nothing outside the manifest, so it has no --out flag.
     out_dir = Path(getattr(args, "out", "."))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.no_cache:
-        common.set_cache_enabled(False)
-
     stages = list(STAGES) if args.stage == "all" else [args.stage]
     study = _load(study_path)
-    analysis: dict[str, Any] | None = None
+    analysis: AnalysisPayload | None = None
 
     for stage in stages:
         print(f"[{stage}]")
         if stage == "resolve":
-            study = stage_resolve(study, args)
+            study = stage_resolve(study, args, client=client)
             _save(study_path, study)
         elif stage == "fetch":
-            stage_fetch(study, out_dir, args)
+            stage_fetch(study, out_dir, args, client=client)
         elif stage == "analyze":
             analysis = stage_analyze(out_dir)
         elif stage == "chart":
@@ -304,7 +404,22 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 # --------------------------------------------------------------------------
+def _month_arg(value: str) -> str:
+    """argparse ``type=`` for ``--since``/``--until``: only ``YYYY-MM`` passes.
+
+    Raises:
+        argparse.ArgumentTypeError: The value is malformed -- argparse then
+            prints the reason and exits with code 2 before anything is
+            written, instead of a later stage crashing on the bad month.
+    """
+    try:
+        return common.parse_month(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
+    """Build the ``run.py`` CLI: one subcommand per action, ``all`` by default."""
     parser = argparse.ArgumentParser(
         prog="run.py",
         description="Wikipedia audience-interest analysis (resolve -> fetch -> "
@@ -314,22 +429,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common_args(target: argparse.ArgumentParser) -> None:
         target.add_argument("--study", default="study.json", help="study manifest path")
-        target.add_argument("--no-cache", action="store_true",
-                            help="ignore cached responses (forces refetch)")
+        target.add_argument(
+            "--no-cache",
+            action="store_true",
+            help="ignore cached responses (forces refetch)",
+        )
 
     init = sub.add_parser("init", help="create a study manifest")
     common_args(init)
     init.add_argument("--topic", required=True, help="topic to analyse")
-    init.add_argument("--langs", required=True, help="comma-separated language codes, e.g. pl,cs")
-    init.add_argument("--since", help="window start, YYYY-MM")
-    init.add_argument("--until", help="window end, YYYY-MM (must be a complete month)")
-    init.add_argument("--force", action="store_true", help="overwrite an existing manifest")
+    init.add_argument(
+        "--langs", required=True, help="comma-separated language codes, e.g. pl,cs"
+    )
+    init.add_argument("--since", type=_month_arg, help="window start, YYYY-MM")
+    init.add_argument(
+        "--until",
+        type=_month_arg,
+        help="window end, YYYY-MM (must be a complete month)",
+    )
+    init.add_argument(
+        "--force", action="store_true", help="overwrite an existing manifest"
+    )
     init.set_defaults(func=cmd_init)
 
     run = sub.add_parser("all", help="run every stage (default)")
     common_args(run)
-    run.add_argument("--stage", default="all",
-                     choices=("all",) + STAGES, help="run a single stage")
+    run.add_argument(
+        "--stage", default="all", choices=("all",) + STAGES, help="run a single stage"
+    )
     run.add_argument("--out", default=".", help="output directory (default: cwd)")
     run.add_argument("--qid", help="skip topic search; use this Wikidata id")
     run.add_argument("--search-lang", default="en", help="language for concept search")
@@ -350,7 +477,9 @@ def build_parser() -> argparse.ArgumentParser:
     common_args(status)
     status.set_defaults(func=cmd_status)
 
-    override = sub.add_parser("override", help="explicitly choose an article for a gap language")
+    override = sub.add_parser(
+        "override", help="explicitly choose an article for a gap language"
+    )
     common_args(override)
     override.add_argument("--lang", required=True, help="language code")
     override.add_argument("--title", required=True, help="exact article title")
@@ -363,6 +492,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch a subcommand and turn every failure into a visible exit code.
+
+    A missing subcommand means ``all``; leading flags belong to ``all``.
+    Networked commands (:func:`cmd_run`) get one freshly built
+    ``http_client.default_client()`` -- the composition root of this CLI.
+
+    Returns:
+        ``0`` on success, else the failing stage's exit code (``1`` for
+        errors). Error messages from stages (``SystemExit("error: ...")``)
+        are printed to stderr here -- swallowing them would make every CLI
+        failure silent.
+    """
     common.configure_console()
     parser = build_parser()
 
@@ -375,13 +516,25 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(words)
     try:
-        args.func(args)
+        if args.func is cmd_run:
+            # The client is built here, not in the stages: one session, one
+            # cache switch, one politeness cadence for the whole run.
+            # Commands that never talk to the API never construct one.
+            with http_client.default_client(cache_enabled=not args.no_cache) as client:
+                args.func(args, client=client)
+        else:
+            args.func(args)
     except common.ApiError as exc:
         print(f"error [{exc.kind}]: {exc}", file=sys.stderr)
         return 1
     except SystemExit as exc:
         if isinstance(exc.code, int):
             return exc.code
+        if exc.code is not None:
+            # SystemExit("error: ...") carries the message as its code.
+            # Printing it here is what makes `run.py` failures visible --
+            # swallowing it would exit 1 with no explanation at all.
+            print(exc.code, file=sys.stderr)
         return 1
     return 0
 

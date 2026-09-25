@@ -25,7 +25,7 @@ similar article.**
 ```bash
 cd skills/wikipedia-interest-analyzer
 uv sync                      # installs pinned deps from uv.lock
-uv run pytest                # optional: 113 offline tests, ~8s
+uv run pytest                # optional: 182 offline tests, ~8s
 ```
 
 **Treat the skill directory as read-only.** Every command takes `--study` (the
@@ -34,8 +34,9 @@ omitting them writes into the skill folder. Always pass both. Throughout,
 `$WORK` means any writable directory *outside* the skill (e.g.
 `C:\interest-report` or `./interest-report`).
 
-The HTTP cache is the one exception: it always lives in
-`skills/wikipedia-interest-analyzer/cache/`, is shared between studies and runs,
+The HTTP cache is the one exception: it lives (unless `WIA_CACHE_DIR` says
+otherwise) in `skills/wikipedia-interest-analyzer/cache/`, is shared between
+studies and runs,
 is gitignored, and is **not** moved by `--out`. Clear it with
 `run.py clear-cache`.
 
@@ -164,7 +165,7 @@ with the same `--study`/`--out`:
 ## Rules
 
 1. **Never hand-write a pageviews URL.** Title encoding and URL building live in
-   exactly one place, `scripts/common.py`. Everything goes through
+   exactly one place, `scripts/api.py` (re-exported as `common.*`). Everything goes through
    `common.per_article_url` / `common.aggregate_url` / `common.action_api`.
 2. **Never substitute an article automatically.** Report the gap; if the user
    picks a candidate, use `override` so it is recorded and disclosed.
@@ -190,7 +191,7 @@ with the same `--study`/`--out`:
 | `report does not fit on one page` | too much text/languages; split the study or shorten the verdict — HTML was still written |
 | `HTTP 404 … invalid route` | a malformed path (client bug), not missing data |
 | `no data for those date(s)` | valid request, nothing in that range; check the window is after 2015-07 |
-| `analysis.json not found -- run 'run.py all --stage fetch' first` | stages are ordered; run the earlier one (or just `all`) |
+| `series.json not found -- run 'run.py all --stage fetch' first` | stages are ordered; run the earlier one (or just `all`) |
 | `UnicodeEncodeError` printing a title | fixed by `common.configure_console()`; if you add a new entry point, call it |
 
 ## Deeper reading (load only when needed)

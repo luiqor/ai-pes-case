@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
-
 import analyze as analyze_mod
 import chart as chart_mod
+import pytest
 
 
 def test_renders_png_and_svg(golden_analysis, tmp_path):

@@ -11,9 +11,9 @@ from __future__ import annotations
 import json
 from datetime import date
 
-import pytest
-
 import common
+import http_client
+import pytest
 from helpers import FIXTURES, MANIFEST
 
 
@@ -236,3 +236,94 @@ def load_by_fragment(fragment: str):
 def test_strip_html_strips_tags_and_treats_none_as_empty():
     assert common.strip_html('<span class="searchmatch">foo</span> bar') == "foo bar"
     assert common.strip_html(None) == ""
+
+
+# ------------------------------------------------------------ cache honesty --
+# The cache lives on the client, so these tests build one per tmp dir instead
+# of patching module globals: two clients cannot share state by accident.
+def test_cache_roundtrip_is_silent_when_the_entry_is_usable(tmp_path, capsys):
+    client = http_client.WikiClient(cache_dir=tmp_path)
+    url = "https://example.test/metrics/roundtrip"
+    client._write_cache(url, {"items": [1, 2]})
+
+    assert client._read_cache(url) == {"items": [1, 2]}
+    assert capsys.readouterr().err == "", "a healthy cache must stay quiet"
+
+
+def test_missing_cache_entry_is_a_normal_cold_start_and_stays_silent(tmp_path, capsys):
+    client = http_client.WikiClient(cache_dir=tmp_path)
+
+    assert client._read_cache("https://example.test/metrics/never-seen") is (
+        http_client._CACHE_MISS
+    )
+    assert capsys.readouterr().err == "", "first fetch is not a warning"
+
+
+def test_unreadable_cache_entry_is_reported_before_being_discarded(tmp_path, capsys):
+    """Discarding data must never be invisible: the run loses its reuse value."""
+    client = http_client.WikiClient(cache_dir=tmp_path)
+    url = "https://example.test/metrics/corrupt"
+    entry = client._cache_path(url)
+    entry.write_text("{truncated", encoding="utf-8")
+
+    assert client._read_cache(url) is http_client._CACHE_MISS
+
+    err = capsys.readouterr().err
+    assert "unreadable cache entry" in err and entry.name in err
+    assert not entry.exists(), "the corrupt entry must not be read again"
+
+
+def test_cache_write_failure_is_reported_and_never_breaks_the_run(tmp_path, capsys):
+    """A read-only cache degrades loudly, not silently, and never aborts."""
+    blocker = tmp_path / "not-a-directory.txt"
+    blocker.write_text("x", encoding="utf-8")
+    client = http_client.WikiClient(cache_dir=blocker)
+
+    client._write_cache("https://example.test/metrics/x", {"ok": 1})  # must not raise
+
+    assert "could not write the response cache" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------ environment ---
+# The two WIA_* variables are read once at import; the resolvers are called
+# directly here so each failure mode is exercised without reloading common.
+def test_user_agent_env_default_and_verbatim_passthrough(monkeypatch):
+    monkeypatch.delenv("WIA_USER_AGENT", raising=False)
+    assert "wikipedia-interest-analyzer" in common._user_agent_from_env()
+
+    monkeypatch.setenv("WIA_USER_AGENT", "me@example.org")
+    assert common._user_agent_from_env() == "me@example.org"
+
+
+def test_user_agent_env_rejects_empty_and_multiline_values(monkeypatch):
+    monkeypatch.setenv("WIA_USER_AGENT", "   ")
+    with pytest.raises(SystemExit) as excinfo:
+        common._user_agent_from_env()
+    assert "empty" in str(excinfo.value)
+
+    monkeypatch.setenv("WIA_USER_AGENT", "me@example.org\nX-Injected: 1")
+    with pytest.raises(SystemExit) as excinfo:
+        common._user_agent_from_env()
+    assert "line breaks" in str(excinfo.value)
+
+
+def test_cache_dir_env_empty_falls_back_to_the_skill_folder(monkeypatch):
+    monkeypatch.setenv("WIA_CACHE_DIR", "")
+    assert common._cache_dir_from_env() == common.SKILL_ROOT / "cache"
+
+
+def test_cache_dir_env_rejects_a_path_that_is_a_file(monkeypatch, tmp_path):
+    blocker = tmp_path / "not-a-directory.txt"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("WIA_CACHE_DIR", str(blocker))
+    with pytest.raises(SystemExit) as excinfo:
+        common._cache_dir_from_env()
+    assert "not a directory" in str(excinfo.value)
+
+
+# ---------------------------------------------------------- month parsing ---
+def test_parse_month_accepts_real_months_and_rejects_junk():
+    assert common.parse_month("2024-10") == "2024-10"
+    for bad in ("banana", "2024-13", "2024/10", "202410", ""):
+        with pytest.raises(ValueError):
+            common.parse_month(bad)

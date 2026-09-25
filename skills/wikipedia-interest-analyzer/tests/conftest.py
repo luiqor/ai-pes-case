@@ -1,19 +1,19 @@
 """Shared test setup: offline-only fixtures and reusable study builders.
 
-Every test in this suite runs **without network access**. ``offline`` monkey
-patches ``common.get_json`` so that only URLs present in
-``tests/fixtures/manifest.json`` resolve; anything else raises, which turns an
-unrecorded dependency into a loud failure instead of a live request.
+Every test in this suite runs **without network access**. ``offline`` swaps
+the transport factory (``http_client.default_client``) for one serving only URLs
+present in ``tests/fixtures/manifest.json``; anything else raises, which turns
+an unrecorded dependency into a loud failure instead of a live request.
 """
 
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
-
 from helpers import GOLDEN_SINCE, GOLDEN_TODAY, GOLDEN_UNTIL, load_fixture
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,18 +23,40 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import common  # noqa: E402
+import http_client  # noqa: E402
 
 common.configure_console()
 
 
+class FixtureClient:
+    """Offline stand-in for ``http_client.default_client()``'s WikiClient.
+
+    Implements the transport surface the pipeline touches: ``get_json``
+    (recorded fixtures only) plus the lifecycle methods the composition
+    roots use. Cache, cadence and retries are irrelevant without a network.
+    """
+
+    def get_json(self, url: str) -> Any:
+        return load_fixture(url)
+
+    def __enter__(self) -> FixtureClient:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+
 @pytest.fixture(autouse=True)
 def offline(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], Any]:
-    """Replace the HTTP layer with fixture lookups (no network possible).
+    """Make the suite structurally offline (a test cannot forget this).
 
-    Autouse, so the offline guarantee is structural: a test cannot forget to
-    ask for it, and an unrecorded URL raises instead of hitting the network.
+    Every composition root (each ``main``) and every library default
+    (``resolve()``/``fetch_series()`` called without an injected client)
+    obtains its transport through ``http_client.default_client()``; patching
+    that single factory means no code path can reach the network, while
+    ``http_client.WikiClient`` itself stays real for tests that need it.
     """
-    monkeypatch.setattr(common, "get_json", load_fixture)
+    monkeypatch.setattr(http_client, "default_client", lambda **_: FixtureClient())
     return load_fixture
 
 
@@ -120,7 +142,9 @@ def make_series() -> Callable[..., dict[str, Any]]:
 
 
 @pytest.fixture
-def resolve_study(study_factory: Callable[..., dict[str, Any]], offline) -> Callable[[], dict[str, Any]]:
+def resolve_study(
+    study_factory: Callable[..., dict[str, Any]], offline
+) -> Callable[[], dict[str, Any]]:
     """A study with its resolution filled in, using recorded responses."""
 
     def _resolve(**kwargs: Any) -> dict[str, Any]:

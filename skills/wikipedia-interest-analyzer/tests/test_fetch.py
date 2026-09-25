@@ -11,11 +11,10 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
-
 import common
 import fetch as fetch_mod
-from helpers import GOLDEN_TODAY, GOLDEN_UNTIL
+import pytest
+from helpers import GOLDEN_TODAY, GOLDEN_UNTIL, load_fixture
 
 
 # ------------------------------------------------------------- golden series -
@@ -186,3 +185,44 @@ def test_effective_titles_precedence(resolve_study):
     assert "pl" not in titles
     assert gaps == ["pl"]
     assert any("coverage gap" in w for w in warnings)
+
+
+# ------------------------------------------------- response validation ------
+def test_well_formed_points_become_month_keys():
+    payload = {"items": [{"timestamp": "2024100100", "views": 7}]}
+    assert fetch_mod._parse_points(payload, "https://example.test") == {"2024-10": 7}
+
+
+def test_malformed_points_are_a_bad_body_not_a_traceback():
+    """A corrupt body must classify as ``bad_body`` (SKILL.md maps kinds),
+    instead of a bare KeyError/ValueError deep inside the fetch."""
+    payload = {"items": [{"timestamp": "banana", "views": -1}]}
+    with pytest.raises(common.ApiError) as excinfo:
+        fetch_mod._parse_points(payload, "https://example.test")
+    assert excinfo.value.kind == "bad_body"
+
+
+def test_body_without_items_is_a_bad_body():
+    with pytest.raises(common.ApiError) as excinfo:
+        fetch_mod._parse_points({"unexpected": True}, "https://example.test")
+    assert excinfo.value.kind == "bad_body"
+
+
+def test_corrupt_pageview_response_stops_the_fetch_with_bad_body(resolve_study):
+    """End to end: a corrupt *pageviews* body (Wikidata/Action API intact)
+    fails the whole fetch loudly, quoting the URL's kind.
+
+    The transport is injected rather than patched -- the seam the pipeline
+    was designed around.
+    """
+    study = resolve_study()
+
+    class CorruptPageviews:
+        def get_json(self, url: str):
+            if "/metrics/pageviews/" in url:
+                return {"items": [{"timestamp": "oops", "views": "NaN"}]}
+            return load_fixture(url)
+
+    with pytest.raises(SystemExit) as excinfo:
+        fetch_mod.fetch_series(study, today=GOLDEN_TODAY, client=CorruptPageviews())
+    assert "error [bad_body]" in str(excinfo.value)

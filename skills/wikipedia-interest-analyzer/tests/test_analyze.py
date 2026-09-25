@@ -7,10 +7,9 @@ regressed.
 
 from __future__ import annotations
 
-import pytest
-
 import analyze as analyze_mod
 import common
+import pytest
 
 
 # --------------------------------------------------------------- primitives --
@@ -89,9 +88,7 @@ def test_alignment_follows_the_offset_rule(months, expected):
     which is why the default window is 24. Found by extending a live study to
     44 months and watching the confidence grade fall.
     """
-    labels = common.month_range(
-        common.shift_month("2026-08", -(months - 1)), "2026-08"
-    )
+    labels = common.month_range(common.shift_month("2026-08", -(months - 1)), "2026-08")
 
     split = analyze_mod.split_windows(labels)
 
@@ -246,7 +243,10 @@ def test_comparison_ranks_polish_higher_on_share(golden_analysis):
     assert comparison["highest_share"] == "pl"
     # Both fall, so 'fastest growth' is the least-bad: still a decline.
     assert comparison["fastest_growth"] == "pl"
-    assert [row["language"] for row in comparison["by_growth_share_pct"]] == ["pl", "cs"]
+    assert [row["language"] for row in comparison["by_growth_share_pct"]] == [
+        "pl",
+        "cs",
+    ]
 
 
 def test_assumptions_and_limitations_are_always_present(golden_analysis):
@@ -259,7 +259,9 @@ def test_assumptions_and_limitations_are_always_present(golden_analysis):
 def test_gap_is_reported_and_never_substituted(gap_analysis):
     assert gap_analysis["gaps"] == ["pl"]
     assert "pl" not in gap_analysis["metrics"]
-    assert any("never filled with a substitute" in x for x in gap_analysis["limitations"])
+    assert any(
+        "never filled with a substitute" in x for x in gap_analysis["limitations"]
+    )
     assert "not measurable" in gap_analysis["headline"]
 
 

@@ -6,14 +6,42 @@ requires-python = ">=3.12"
 dependencies = [
     "matplotlib>=3.9",
     "pandas>=2.2",
+    "pydantic>=2.10",
     "reportlab>=4.2",
     "requests>=2.32",
 ]
 
 [dependency-groups]
+# `dev` is installed by a plain `uv sync` (uv's default group), so it stays
+# lean: only what running the test suite needs.
 dev = [
     "pytest>=8.3",
 ]
+# Quality gate (ruff + mypy) lives in a NON-default group so that the skill's
+# documented one-command setup (`uv sync`) costs agents nothing extra.
+# Install with:  uv sync --group lint
+lint = [
+    "mypy>=1.15",
+    "pandas-stubs>=2.2",
+    "ruff>=0.12",
+    "types-reportlab>=4.2",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "BLE", "SIM", "PTH", "S110", "S112"]
+
+[tool.ruff.lint.flake8-bandit]
+check-typed-exception = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["scripts"]
+warn_unused_ignores = true
 
 [tool.uv]
 # This is a script collection, not an installable library.

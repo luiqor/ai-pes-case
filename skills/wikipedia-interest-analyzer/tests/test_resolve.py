@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import argparse
 
-import pytest
-
 import common
+import http_client
+import pytest
 import resolve as resolve_mod
 
 
@@ -51,7 +51,9 @@ def test_explicit_qid_skips_the_topic_search(monkeypatch):
         raise AssertionError("wbsearchentities must not be called with --qid")
 
     monkeypatch.setattr(resolve_mod, "_search_concept", explode)
-    result = resolve_mod.resolve("whatever the user typed", ["pl", "cs"], qid="Q1666254")
+    result = resolve_mod.resolve(
+        "whatever the user typed", ["pl", "cs"], qid="Q1666254"
+    )
     assert result["qid"] == "Q1666254"
     assert result["articles"]["cs"]["title"] == "Přerušovaný půst"
 
@@ -61,7 +63,7 @@ def test_stale_search_hits_are_dropped_with_a_warning(monkeypatch):
     monkeypatch.setattr(
         resolve_mod,
         "_search_wiki",
-        lambda language, term, limit: {
+        lambda language, term, limit, **_: {
             "query": {
                 "search": [
                     {"title": "Live article", "snippet": "ok"},
@@ -72,14 +74,18 @@ def test_stale_search_hits_are_dropped_with_a_warning(monkeypatch):
     )
     monkeypatch.setattr(
         resolve_mod,
-        "_confirm_titles",
-        lambda language, titles: {
+        "confirm_titles",
+        lambda language, titles, **_: {
             "query": {"pages": {"1": {"title": "Live article", "pageid": 1}}}
         },
     )
 
     warnings: list[str] = []
-    candidates = resolve_mod._confirmed_candidates("pl", "topic", 3, warnings)
+    # Both network functions above are patched, so the client is never used;
+    # it is required by the signature all call sites share.
+    candidates = resolve_mod._confirmed_candidates(
+        "pl", "topic", 3, warnings, client=http_client.default_client()
+    )
 
     assert [c["title"] for c in candidates] == ["Live article"]
     assert warnings and "no longer exists" in warnings[0]
@@ -87,7 +93,9 @@ def test_stale_search_hits_are_dropped_with_a_warning(monkeypatch):
 
 def test_missing_concept_raises_a_typed_error(monkeypatch):
     monkeypatch.setattr(
-        resolve_mod, "_search_concept", lambda topic, language, limit: {"search": []}
+        resolve_mod,
+        "_search_concept",
+        lambda topic, language, limit, **_: {"search": []},
     )
     with pytest.raises(common.ApiError) as excinfo:
         resolve_mod.resolve("zzz not a real topic", ["pl"])

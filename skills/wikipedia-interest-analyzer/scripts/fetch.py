@@ -29,7 +29,19 @@ from pathlib import Path
 from typing import Any
 
 import common
+import http_client
 import resolve as resolve_mod
+from payloads import (
+    LanguageSeries,
+    PageviewPoint,
+    RequestParameters,
+    Resolution,
+    SeriesPayload,
+    StudyManifest,
+    StudyWindow,
+    load_study_manifest,
+)
+from pydantic import ValidationError
 
 DEFAULT_MONTHS = 24
 
@@ -43,27 +55,30 @@ def stamp_to_month(stamp: str) -> str:
     return f"{stamp[0:4]}-{stamp[4:6]}"
 
 
-def load_study(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        raise SystemExit(
-            f"error: study manifest not found: {path}\n"
-            "Create one with:  run.py init --topic \"...\" --langs pl,cs"
-        )
-    study = common.read_json(path)
-    for key in ("topic", "languages"):
-        if key not in study:
-            raise SystemExit(f"error: study manifest is missing {key!r}: {path}")
-    if study.get("granularity", common.DEFAULT_GRANULARITY) != "monthly":
-        raise SystemExit(
-            "error: v1 supports granularity 'monthly' only "
-            f"(manifest has {study.get('granularity')!r})"
-        )
-    return study
+def load_study(path: Path) -> StudyManifest:
+    """Load and validate the study manifest.
+
+    All file handling and schema checks live in
+    :func:`payloads.load_study_manifest` (shared with ``run.py``), so the
+    standalone script and the orchestrator accept exactly the same manifests
+    and print exactly the same errors.
+
+    Args:
+        path: Location of ``study.json``.
+
+    Returns:
+        The validated manifest.
+
+    Raises:
+        SystemExit: The manifest is missing (with the ``run.py init``
+            remedy), unreadable, not JSON, or fails validation -- the message
+            names every bad field (month patterns, language codes, the
+            access/agent/granularity enums).
+    """
+    return load_study_manifest(path)
 
 
-def _warn_if_halves_not_aligned(
-    since: str, until: str, warnings: list[str]
-) -> None:
+def _warn_if_halves_not_aligned(since: str, until: str, warnings: list[str]) -> None:
     """Warn when this window length cannot be split into comparable halves.
 
     Growth is measured by comparing the second half of the window against the
@@ -85,11 +100,28 @@ def _warn_if_halves_not_aligned(
 
 
 def resolve_window(
-    study: dict[str, Any], today: date | None = None
+    study: StudyManifest, today: date | None = None
 ) -> tuple[str, str, list[str]]:
-    """Return ``(since, until)`` clamped to complete, available data."""
+    """Return ``(since, until)`` clamped to complete, available data.
+
+    Clamps, in order: an unset end becomes the last complete month, a future
+    end is pulled back to it, a start before 2015-07 is floored, and a window
+    with no complete months left is rejected.
+
+    Args:
+        study: Manifest whose ``window`` (if any) is being resolved.
+        today: Reference date; defaults to ``date.today()`` (tests inject a
+            fixed date so the golden numbers stay reproducible).
+
+    Returns:
+        ``(since, until, warnings)`` -- both months ``YYYY-MM``, plus every
+        adjustment or alignment caveat the caller must disclose.
+
+    Raises:
+        SystemExit: If the requested window contains no complete months.
+    """
     warnings: list[str] = []
-    window = study.get("window") or {}
+    window: StudyWindow = study.get("window") or StudyWindow()
     since = window.get("since")
     until = window.get("until")
 
@@ -128,7 +160,7 @@ def resolve_window(
 
 
 def effective_titles(
-    study: dict[str, Any],
+    study: StudyManifest,
 ) -> tuple[dict[str, str], dict[str, str], list[str], list[str], list[str]]:
     """Pick one article title per language.
 
@@ -137,9 +169,18 @@ def effective_titles(
     only ever made deliberately by a human, never automatically. ``native_missing``
     lists override languages that have no article of their own for the topic, so
     the coverage gap stays visible downstream.
+
+    Args:
+        study: Manifest carrying ``languages``, ``overrides`` and the
+            ``resolution`` written by the resolve stage.
+
+    Returns:
+        The five-tuple described above; ``sources`` maps language to
+        ``"override"`` or ``"sitelink"``.
     """
-    overrides = study.get("overrides") or {}
-    articles = (study.get("resolution") or {}).get("articles") or {}
+    overrides: dict[str, str] = study.get("overrides") or {}
+    resolution: Resolution = study.get("resolution") or Resolution()
+    articles: dict[str, dict[str, Any] | None] = resolution.get("articles") or {}
 
     titles: dict[str, str] = {}
     sources: dict[str, str] = {}
@@ -148,16 +189,18 @@ def effective_titles(
     warnings: list[str] = []
 
     for language in study["languages"]:
-        if overrides.get(language):
-            titles[language] = str(overrides[language])
+        override = overrides.get(language)
+        article = articles.get(language)
+        if override:
+            titles[language] = str(override)
             sources[language] = "override"
-            if not articles.get(language):
+            if not article:
                 # The substitution exists because no native article does. Keep
                 # that fact attached to the data -- an override must never
                 # silently erase a coverage gap.
                 native_missing.append(language)
-        elif articles.get(language):
-            titles[language] = str(articles[language].get("title"))
+        elif article:
+            titles[language] = str(article.get("title"))
             sources[language] = "sitelink"
         else:
             gaps.append(language)
@@ -168,10 +211,19 @@ def effective_titles(
     return titles, sources, gaps, native_missing, warnings
 
 
-def confirm_titles(titles: dict[str, str]) -> None:
-    """Fail loudly if a chosen title does not exist (protects overrides)."""
+def confirm_titles(titles: dict[str, str], *, client: common.JsonFetcher) -> None:
+    """Fail loudly if a chosen title does not exist (protects overrides).
+
+    Args:
+        titles: Language code to chosen article title.
+        client: Injected transport shared with the caller's other requests.
+
+    Raises:
+        SystemExit: Naming the offending language and title, with the remedy
+            (fix ``overrides.<lang>`` in the manifest).
+    """
     for language, title in titles.items():
-        info = resolve_mod._confirm_titles(language, [title])
+        info = resolve_mod.confirm_titles(language, [title], client=client)
         exists, _ = common.page_exists(info, title)
         if not exists:
             raise SystemExit(
@@ -181,12 +233,65 @@ def confirm_titles(titles: dict[str, str]) -> None:
             )
 
 
+def _parse_points(payload: Any, url: str) -> dict[str, int]:
+    """Parse a pageviews response body into ``{month: views}`` (validated).
+
+    Both endpoints share this shape, so validating the points here turns a
+    corrupt or unexpected body into a classified API error instead of a
+    ``KeyError``/``ValueError`` traceback in the middle of a fetch.
+
+    Args:
+        payload: Decoded JSON body as returned by the injected client.
+        url: Request URL, quoted in the error so it can be reproduced.
+
+    Returns:
+        Mapping of ``YYYY-MM`` month to view count.
+
+    Raises:
+        ApiError: ``kind="bad_body"`` when the body has no ``items`` list or
+            contains a point that is not a non-negative monthly bucket.
+    """
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise common.ApiError(
+            f"unexpected pageviews response (no 'items' list) from {url}",
+            url=url,
+            kind="bad_body",
+            detail=payload,
+        )
+    try:
+        points = [PageviewPoint.model_validate(item) for item in items]
+    except ValidationError as exc:
+        raise common.ApiError(
+            f"malformed pageviews item from {url}: {exc.error_count()} problem(s)",
+            url=url,
+            kind="bad_body",
+            detail=str(exc),
+        ) from exc
+    return {stamp_to_month(point.timestamp): point.views for point in points}
+
+
 def _fetch_project_series(
-    project: str, since: str, until: str, *, access: str, agent: str
+    project: str,
+    since: str,
+    until: str,
+    *,
+    access: str,
+    agent: str,
+    client: common.JsonFetcher,
 ) -> dict[str, int]:
+    """Project-wide monthly views; ``{month: views}``.
+
+    Raises:
+        SystemExit: Because a project with no data means the *request* is
+            wrong (bad project or pre-2015 window), never "no interest" --
+            and a malformed response body fails here the same way
+            (``error [bad_body]``), never as a traceback.
+    """
     url = common.aggregate_url(project, since, until, access=access, agent=agent)
     try:
-        payload = common.get_json(url)
+        payload = client.get_json(url)
+        return _parse_points(payload, url)
     except common.ApiError as exc:
         if exc.kind == "no_data":
             raise SystemExit(
@@ -195,10 +300,6 @@ def _fetch_project_series(
                 f"{common.DATA_START_MONTH}."
             ) from exc
         raise SystemExit(f"error [{exc.kind}]: {exc}") from exc
-    return {
-        stamp_to_month(item["timestamp"]): int(item["views"])
-        for item in payload.get("items", [])
-    }
 
 
 def _fetch_article_series(
@@ -210,12 +311,24 @@ def _fetch_article_series(
     access: str,
     agent: str,
     warnings: list[str],
+    client: common.JsonFetcher,
 ) -> dict[str, int]:
+    """Article monthly views; ``{month: views}``.
+
+    A ``no_data`` 404 means genuinely zero views in this window (zeros are
+    omitted from the series), so it returns an empty mapping *and* records
+    the fact in ``warnings`` rather than failing.
+
+    Raises:
+        SystemExit: On a malformed route (title-encoding bug) or any other
+            real error -- never for "no views".
+    """
     url = common.per_article_url(
         project, title, since, until, access=access, agent=agent
     )
     try:
-        payload = common.get_json(url)
+        payload = client.get_json(url)
+        return _parse_points(payload, url)
     except common.ApiError as exc:
         if exc.kind == "no_data":
             warnings.append(
@@ -230,21 +343,46 @@ def _fetch_article_series(
                 f"({exc.detail}). Title encoding failed -- this is a bug."
             ) from exc
         raise SystemExit(f"error [{exc.kind}]: {exc}") from exc
-    return {
-        stamp_to_month(item["timestamp"]): int(item["views"])
-        for item in payload.get("items", [])
-    }
 
 
-def fetch_series(study: dict[str, Any], today: date | None = None) -> dict[str, Any]:
-    """Run every request in a study and return the ``series.json`` payload."""
+def fetch_series(
+    study: StudyManifest,
+    today: date | None = None,
+    *,
+    client: common.JsonFetcher | None = None,
+) -> SeriesPayload:
+    """Run every request in a study and build the ``series.json`` payload.
+
+    For each language with a title: fetch project-wide views, fetch article
+    views, trim both to the months actually loaded, and record any coverage
+    gap or zero-view caveat as a warning.
+
+    Args:
+        study: Manifest carrying ``resolution`` (and optionally overrides).
+        today: Reference date for the window; ``None`` means today (tests
+            inject a fixed date so golden numbers stay reproducible).
+        client: Injected transport. ``None`` builds one for this call --
+            callers doing more (e.g. ``run.py all``) should pass one shared
+            client (``http_client.default_client()``) instead.
+
+    Returns:
+        The :class:`payloads.SeriesPayload` written by the fetch stage.
+
+    Raises:
+        SystemExit: For an empty/invalid window or a project that returned
+            no months at all (both indicate a wrong request, not no interest).
+        ApiError: For API failures beyond the retry budget.
+    """
+    if client is None:
+        client = http_client.default_client()
+    resolution: Resolution = study.get("resolution") or Resolution()
     since, until, warnings = resolve_window(study, today)
     titles, sources, gaps, native_missing, title_warnings = effective_titles(study)
     warnings.extend(title_warnings)
 
-    confirm_titles(titles)
+    confirm_titles(titles, client=client)
 
-    parameters = {
+    parameters: RequestParameters = {
         "access": study.get("access", common.DEFAULT_ACCESS),
         "agent": study.get("agent", common.DEFAULT_AGENT),
         "granularity": "monthly",
@@ -262,12 +400,17 @@ def fetch_series(study: dict[str, Any], today: date | None = None) -> dict[str, 
     # show the truncation, but overshooting it as well keeps one uniform rule
     # and costs a single extra request that is cached anyway.
     fetch_until = common.shift_month(until, FETCH_OVERSHOOT_MONTHS)
-    series: dict[str, dict[str, Any]] = {}
+    series: dict[str, LanguageSeries] = {}
 
     for language, title in titles.items():
         project = common.project_for(language)
         project_views = _fetch_project_series(
-            project, since, fetch_until, access=parameters["access"], agent=parameters["agent"]
+            project,
+            since,
+            fetch_until,
+            access=parameters["access"],
+            agent=parameters["agent"],
+            client=client,
         )
         article_raw = _fetch_article_series(
             project,
@@ -277,6 +420,7 @@ def fetch_series(study: dict[str, Any], today: date | None = None) -> dict[str, 
             access=parameters["access"],
             agent=parameters["agent"],
             warnings=warnings,
+            client=client,
         )
 
         # Trim to months the project series actually has: a loaded month always
@@ -314,7 +458,7 @@ def fetch_series(study: dict[str, Any], today: date | None = None) -> dict[str, 
     return {
         "generated_at": (today or date.today()).isoformat(),
         "topic": study["topic"],
-        "qid": (study.get("resolution") or {}).get("qid"),
+        "qid": resolution.get("qid"),
         "window": {"since": since, "until": until, "months": len(desired)},
         "parameters": parameters,
         "series": series,
@@ -324,21 +468,25 @@ def fetch_series(study: dict[str, Any], today: date | None = None) -> dict[str, 
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the ``fetch.py`` command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--study", default="study.json", help="study manifest path")
     parser.add_argument("--out", default=".", help="output directory (default: cwd)")
-    parser.add_argument("--no-cache", action="store_true", help="ignore cached responses")
+    parser.add_argument(
+        "--no-cache", action="store_true", help="ignore cached responses"
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Read the manifest, fetch every series, write ``series.json``."""
     common.configure_console()
     args = build_parser().parse_args(argv)
-    if args.no_cache:
-        common.set_cache_enabled(False)
 
     study = load_study(Path(args.study))
-    payload = fetch_series(study)
+    # Composition root: one client covers every request of this run.
+    with http_client.default_client(cache_enabled=not args.no_cache) as client:
+        payload = fetch_series(study, client=client)
     out = Path(args.out) / "series.json"
     common.write_json(out, payload)
 

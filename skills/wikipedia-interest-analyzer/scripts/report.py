@@ -19,16 +19,16 @@ import html
 import string
 import sys
 from pathlib import Path
-from typing import Any
 
-from reportlab.lib.colors import HexColor
+import common
+from payloads import AnalysisPayload
+from reportlab.lib.colors import Color, HexColor
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.pdfdoc import PDFError
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas as pdf_canvas
-
-import common
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_PATH = SKILL_ROOT / "assets" / "report_template.html"
@@ -68,7 +68,14 @@ class ReportOverflow(RuntimeError):
 # Fonts
 # --------------------------------------------------------------------------
 def _register_fonts() -> tuple[str, str]:
-    """Register the Unicode font that ships inside the matplotlib wheel."""
+    """Register the Unicode font that ships inside the matplotlib wheel.
+
+    Fonts are an explicitly optional resource: if matplotlib is not installed
+    (``ImportError``), the files cannot be read (``OSError``), or reportlab
+    rejects them (``PDFError``), the report falls back to Helvetica and the
+    reason is printed on stderr. Anything else is a real bug and propagates.
+    """
+    reason: str | None = None
     try:
         import matplotlib
 
@@ -80,11 +87,13 @@ def _register_fonts() -> tuple[str, str]:
             pdfmetrics.registerFont(TTFont("WIA-Sans", str(regular)))
             pdfmetrics.registerFont(TTFont("WIA-Sans-Bold", str(bold)))
             return "WIA-Sans", "WIA-Sans-Bold"
-    except Exception:  # pragma: no cover - font fallback is host-dependent
-        pass
+        reason = f"font files not found under {base}"
+    except (ImportError, OSError, PDFError) as exc:  # pragma: no cover - host-dependent
+        reason = f"{type(exc).__name__}: {exc}"
     print(
-        "warning: DejaVu fonts unavailable; falling back to Helvetica, which "
-        "cannot render every Latin-ext character (e.g. ř, š, ů)",
+        f"warning: DejaVu fonts unavailable ({reason}); "
+        "falling back to Helvetica, which cannot render every Latin-ext "
+        "character (e.g. ř, š, ů)",
         file=sys.stderr,
     )
     return "Helvetica", "Helvetica-Bold"
@@ -97,6 +106,17 @@ FONT, FONT_BOLD = _register_fonts()
 # Text helpers
 # --------------------------------------------------------------------------
 def wrap(text: str, font: str, size: float, max_width: float) -> list[str]:
+    """Word-wrap ``text`` to ``max_width`` points, measured with ``font``.
+
+    Args:
+        text: Input; each ``\\n``-separated paragraph wraps independently.
+        font: Registered font name used to measure glyph widths.
+        size: Font size in points.
+        max_width: Available width in points.
+
+    Returns:
+        The lines to draw, in order; empty strings represent blank lines.
+    """
     lines: list[str] = []
     for paragraph in str(text).split("\n"):
         words = paragraph.split()
@@ -116,24 +136,28 @@ def wrap(text: str, font: str, size: float, max_width: float) -> list[str]:
 
 
 def fmt_pct(value: float | None) -> str:
+    """Format a percentage with an explicit sign, or ``"n/a"`` when undefined."""
     return "n/a" if value is None else f"{value:+.1f}%"
 
 
 # --------------------------------------------------------------------------
 # Shared presentation (HTML and PDF read from the same structures)
 # --------------------------------------------------------------------------
-def subtitle_for(analysis: dict[str, Any]) -> str:
+def subtitle_for(analysis: AnalysisPayload) -> str:
+    """Build the metadata line under the title (languages, window, access)."""
     params = analysis["parameters"]
     window = analysis["window"]
     return (
         f"{', '.join(analysis['metrics']) or 'no data'} · "
-        f"{window['since']} to {window['until']} ({window.get('months', '?')} months) · "
+        f"{window['since']} to {window['until']} "
+        f"({window.get('months', '?')} months) · "
         f"access={params['access']}, agent={params['agent']} · "
         f"generated {analysis['generated_at']}"
     )
 
 
-def footer_for(analysis: dict[str, Any]) -> str:
+def footer_for(analysis: AnalysisPayload) -> str:
+    """Build the attribution line: data source, methods, concept id."""
     return (
         "Data: Wikimedia Page view analytics (CC0 1.0). "
         "Methods, thresholds and their rationale: references/methods.md. "
@@ -142,7 +166,19 @@ def footer_for(analysis: dict[str, Any]) -> str:
     )
 
 
-def table_rows_for(analysis: dict[str, Any]) -> list[dict[str, str]]:
+def table_rows_for(analysis: AnalysisPayload) -> list[dict[str, str]]:
+    """Build the comparison table: one row per measured language, then gaps.
+
+    Both renderers consume these rows, so the HTML and PDF tables can never
+    disagree. Each row carries a ``"gap"`` marker (empty or ``"gap"``) that
+    the renderers use to colour and align coverage-gap rows.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+
+    Returns:
+        Row dicts keyed by column name plus the ``"gap"`` marker.
+    """
     rows: list[dict[str, str]] = []
     for language, metric in analysis["metrics"].items():
         yoy = metric["yoy"]
@@ -176,12 +212,13 @@ def table_rows_for(analysis: dict[str, Any]) -> list[dict[str, str]]:
     return rows
 
 
-def gaps_note(analysis: dict[str, Any]) -> str:
+def gaps_note(analysis: AnalysisPayload) -> str:
+    """Inline HTML noting languages with no article (empty string if none)."""
     gaps = analysis.get("gaps", [])
     if not gaps:
         return ""
     return (
-        f" <span class=\"gap\">No article exists in: {html.escape(', '.join(gaps))} "
+        f' <span class="gap">No article exists in: {html.escape(", ".join(gaps))} '
         "&mdash; reported as a coverage gap, never replaced by a substitute.</span>"
     )
 
@@ -189,7 +226,7 @@ def gaps_note(analysis: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------
 # HTML
 # --------------------------------------------------------------------------
-def caveat_items(analysis: dict[str, Any]) -> list[str]:
+def caveat_items(analysis: AnalysisPayload) -> list[str]:
     """Everything the reader must weigh: warnings, then limitations, then assumptions.
 
     Runtime warnings used to reach only ``analysis.json``, so a reader of the
@@ -211,7 +248,29 @@ def caveat_items(analysis: dict[str, Any]) -> list[str]:
     return unique
 
 
-def render_html(analysis: dict[str, Any], chart_png: Path | None, out_path: Path) -> None:
+def _table_cell(name: str, row: dict[str, str]) -> str:
+    """One ``<td>``; a gap row's Article cell gets the ``gap`` marker span."""
+    value = html.escape(row[name])
+    if row["gap"] and name == "Article":
+        return f'<td><span class="gap">{value}</span></td>'
+    return f"<td>{value}</td>"
+
+
+def render_html(
+    analysis: AnalysisPayload, chart_png: Path | None, out_path: Path
+) -> None:
+    """Write the self-contained HTML report (chart embedded as base64).
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        chart_png: Chart to embed; a missing/absent file degrades to a
+            placeholder note rather than breaking the report.
+        out_path: Output file; parent directories are created.
+
+    Raises:
+        OSError: If the template or output cannot be read/written.
+        KeyError: If a placeholder's section is missing from the payload.
+    """
     template = string.Template(TEMPLATE_PATH.read_text(encoding="utf-8"))
 
     if chart_png and chart_png.is_file():
@@ -223,19 +282,15 @@ def render_html(analysis: dict[str, Any], chart_png: Path | None, out_path: Path
             "all wiki pageviews (bottom).</figcaption></figure>"
         )
     else:
-        chart_block = '<figure class="gap">Chart unavailable (no series to plot).</figure>'
+        chart_block = (
+            '<figure class="gap">Chart unavailable (no series to plot).</figure>'
+        )
 
     header_cells = "".join(f"<th>{html.escape(name)}</th>" for name, _ in TABLE_COLUMNS)
-    body_rows = []
-    for row in table_rows_for(analysis):
-        cells = []
-        for name, _ in TABLE_COLUMNS:
-            value = row[name]
-            if row["gap"] and name == "Article":
-                cells.append(f'<td><span class="gap">{html.escape(value)}</span></td>')
-            else:
-                cells.append(f"<td>{html.escape(value)}</td>")
-        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+    body_rows = [
+        "<tr>" + "".join(_table_cell(name, row) for name, _ in TABLE_COLUMNS) + "</tr>"
+        for row in table_rows_for(analysis)
+    ]
 
     table_block = (
         "<table><thead><tr>"
@@ -270,10 +325,17 @@ class _Sheet:
     """Vertical layout cursor that refuses to draw past the bottom margin."""
 
     def __init__(self, writer: pdf_canvas.Canvas) -> None:
+        """Place the cursor at the top margin of ``writer``."""
         self.writer = writer
         self.y = PAGE_H - MARGIN
 
     def need(self, height: float, what: str) -> None:
+        """Reserve ``height`` points for the block named ``what``.
+
+        Raises:
+            ReportOverflow: When the reservation would cross the bottom
+                margin; the message names the block and the shortfall.
+        """
         if self.y - height < BOTTOM:
             shortfall = BOTTOM - (self.y - height)
             raise ReportOverflow(
@@ -291,11 +353,24 @@ class _Sheet:
         leading: float,
         *,
         max_width: float = CONTENT_W,
-        color=INK,
+        color: Color = INK,
         x: float = MARGIN,
         what: str = "text",
         indent: float = 0.0,
     ) -> None:
+        """Wrap and draw one block, refusing first if it would overflow.
+
+        Args:
+            value: Text to draw (wrapped to ``max_width - indent``).
+            font: Registered font name (``FONT``/``FONT_BOLD``).
+            size: Font size in points.
+            leading: Baseline-to-baseline distance in points.
+            max_width: Block width measured from ``x`` (keyword-only).
+            color: Reportlab colour for the text (keyword-only).
+            x: Left edge in points (keyword-only).
+            what: Block name used in the overflow message (keyword-only).
+            indent: Extra left inset for the wrapped lines (keyword-only).
+        """
         lines = wrap(value, font, size, max_width - indent)
         self.need(leading * len(lines) + 2, what)
         self.writer.setFont(font, size)
@@ -306,10 +381,27 @@ class _Sheet:
         self.y -= 2
 
     def gap(self, height: float) -> None:
+        """Move the cursor down without drawing (spacing only)."""
         self.y -= height
 
 
-def render_pdf(analysis: dict[str, Any], chart_png: Path | None, out_path: Path) -> None:
+def render_pdf(
+    analysis: AnalysisPayload, chart_png: Path | None, out_path: Path
+) -> None:
+    """Write the strictly-one-page PDF, or raise ``ReportOverflow``.
+
+    The layout cursor (``_Sheet``) is checked before every block, so a report
+    that cannot fit fails loudly instead of silently emitting a second page --
+    no output file is written at all in that case.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        chart_png: Chart to draw scaled; ignored when missing/unreadable.
+        out_path: Output file; the caller decides what to do on failure.
+
+    Raises:
+        ReportOverflow: When any block would cross the bottom margin.
+    """
     writer = pdf_canvas.Canvas(str(out_path), pagesize=letter)
     writer.setTitle(f"Audience interest: {analysis['topic']}")
     writer.setAuthor("wikipedia-interest-analyzer")
@@ -332,9 +424,7 @@ def render_pdf(analysis: dict[str, Any], chart_png: Path | None, out_path: Path)
 
     # --- verdict -----------------------------------------------------------
     verdict = analysis["headline"] + (
-        " No article exists in: "
-        + ", ".join(analysis["gaps"])
-        + " -- not measurable."
+        " No article exists in: " + ", ".join(analysis["gaps"]) + " -- not measurable."
         if analysis.get("gaps")
         else ""
     )
@@ -397,7 +487,7 @@ def render_pdf(analysis: dict[str, Any], chart_png: Path | None, out_path: Path)
     writer.rect(MARGIN, header_top - 16, CONTENT_W, 16, stroke=0, fill=1)
     writer.setFont(FONT_BOLD, 7.8)
     writer.setFillColor(INK)
-    for (name, width), x in zip(TABLE_COLUMNS, x_positions):
+    for (name, width), x in zip(TABLE_COLUMNS, x_positions, strict=True):
         value = name
         if name in ALIGN_LEFT:
             writer.drawString(x + 4, header_top - 11.5, value)
@@ -410,7 +500,7 @@ def render_pdf(analysis: dict[str, Any], chart_png: Path | None, out_path: Path)
         sheet.y -= row_height
         writer.setFont(FONT, 7.8)
         writer.setFillColor(HexColor("#a11111") if row["gap"] else INK)
-        for (name, width), x in zip(TABLE_COLUMNS, x_positions):
+        for (name, width), x in zip(TABLE_COLUMNS, x_positions, strict=True):
             value = row[name]
             if name in ALIGN_LEFT:
                 writer.drawString(x + 4, sheet.y + 3.5, value)
@@ -422,11 +512,24 @@ def render_pdf(analysis: dict[str, Any], chart_png: Path | None, out_path: Path)
     sheet.gap(8)
 
     # --- assumptions & limitations ----------------------------------------
-    sheet.text("ASSUMPTIONS & LIMITATIONS", FONT_BOLD, 8.5, 12, color=ACCENT,
-               what="limitations heading")
+    sheet.text(
+        "ASSUMPTIONS & LIMITATIONS",
+        FONT_BOLD,
+        8.5,
+        12,
+        color=ACCENT,
+        what="limitations heading",
+    )
     for item in caveat_items(analysis):
-        sheet.text("\u2022  " + item, FONT, 7.2, 9.4, indent=10,
-                   max_width=CONTENT_W, what="limitations bullet")
+        sheet.text(
+            "\u2022  " + item,
+            FONT,
+            7.2,
+            9.4,
+            indent=10,
+            max_width=CONTENT_W,
+            what="limitations bullet",
+        )
 
     # --- footer ------------------------------------------------------------
     sheet.gap(6)
@@ -441,8 +544,11 @@ def render_pdf(analysis: dict[str, Any], chart_png: Path | None, out_path: Path)
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the ``report.py`` command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--analysis", default="analysis.json", help="input from analyze.py")
+    parser.add_argument(
+        "--analysis", default="analysis.json", help="input from analyze.py"
+    )
     parser.add_argument("--chart", default="chart.png", help="chart PNG from chart.py")
     parser.add_argument("--html", default="report.html", help="HTML output path")
     parser.add_argument("--pdf", default="report.pdf", help="PDF output path")
@@ -450,6 +556,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Write the HTML report always, and the one-page PDF when it fits.
+
+    Returns:
+        ``0`` on success; ``1`` when the PDF overflowed (the HTML is still
+        written and the partial PDF is deleted).
+    """
     common.configure_console()
     args = build_parser().parse_args(argv)
     analysis = common.read_json(args.analysis)

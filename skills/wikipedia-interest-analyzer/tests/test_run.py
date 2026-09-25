@@ -11,9 +11,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 import common
+import pytest
 import run as run_mod
 
 ARTIFACTS = (
@@ -28,10 +27,14 @@ ARTIFACTS = (
 
 GOLDEN_INIT_ARGS = [
     "init",
-    "--topic", "intermittent fasting",
-    "--langs", "pl,cs",
-    "--since", "2024-10",
-    "--until", "2026-08",
+    "--topic",
+    "intermittent fasting",
+    "--langs",
+    "pl,cs",
+    "--since",
+    "2024-10",
+    "--until",
+    "2026-08",
 ]
 
 
@@ -97,12 +100,17 @@ def test_status_before_resolution_says_so(tmp_path, capsys):
 
 def test_override_rejects_a_language_outside_the_study(tmp_path):
     path = _init(tmp_path)
-    assert run_mod.main(["override", "--study", path, "--lang", "uk", "--title", "x"]) == 1
+    assert (
+        run_mod.main(["override", "--study", path, "--lang", "uk", "--title", "x"]) == 1
+    )
 
 
 def test_full_pipeline_produces_every_artifact(tmp_path):
     path = _init(tmp_path)
-    assert run_mod.main(["override", "--study", path, "--lang", "pl", "--title", "Post"]) == 0
+    assert (
+        run_mod.main(["override", "--study", path, "--lang", "pl", "--title", "Post"])
+        == 0
+    )
 
     out = tmp_path / "out"
     assert run_mod.main(["all", "--study", path, "--out", str(out)]) == 0
@@ -150,25 +158,31 @@ def test_unresolvable_stage_fails_with_a_clear_message(tmp_path):
     study = tmp_path / "study.json"
     common.write_json(study, {"topic": "x", "languages": ["pl"]})
     # No resolution yet: fetch must refuse rather than guess.
-    assert run_mod.main(["all", "--stage", "fetch", "--study", str(study), "--out", str(out)]) == 1
+    assert (
+        run_mod.main(
+            ["all", "--stage", "fetch", "--study", str(study), "--out", str(out)]
+        )
+        == 1
+    )
 
 
-def test_report_stage_exits_non_zero_when_the_pdf_cannot_fit(
-    tmp_path, golden_analysis
-):
+def test_report_stage_exits_non_zero_when_the_pdf_cannot_fit(tmp_path, golden_analysis):
     out = tmp_path / "out"
     out.mkdir()
     study = tmp_path / "study.json"
-    common.write_json(study, {"topic": "intermittent fasting", "languages": ["pl", "cs"]})
+    common.write_json(
+        study, {"topic": "intermittent fasting", "languages": ["pl", "cs"]}
+    )
 
     bloated = dict(golden_analysis)
     bloated["limitations"] = [
-        f"Reason {index}: far too much text " + "detail " * 200
-        for index in range(12)
+        f"Reason {index}: far too much text " + "detail " * 200 for index in range(12)
     ]
     common.write_json(out / "analysis.json", bloated)
 
-    rc = run_mod.main(["all", "--stage", "report", "--study", str(study), "--out", str(out)])
+    rc = run_mod.main(
+        ["all", "--stage", "report", "--study", str(study), "--out", str(out)]
+    )
 
     assert rc == 1, "an over-long report must fail, not silently use two pages"
     assert (out / "report.html").is_file(), "HTML has no page limit"
@@ -218,7 +232,9 @@ def test_messages_never_reference_a_subcommand_that_does_not_exist():
     source = Path(run_mod.__file__).read_text(encoding="utf-8")
     referenced = set(re.findall(r"run\.py ([a-z][a-z-]*)", source))
     missing = referenced - set(run_mod.SUBCOMMANDS)
-    assert not missing, f"messages reference non-existent subcommands: {sorted(missing)}"
+    assert not missing, (
+        f"messages reference non-existent subcommands: {sorted(missing)}"
+    )
 
 
 @pytest.mark.parametrize("command", sorted(run_mod.SUBCOMMANDS))
@@ -250,14 +266,18 @@ def test_status_shows_the_effective_window_not_default(tmp_path, capsys):
     assert run_mod.main(["init", "--topic", "x", "--langs", "pl", "--study", path]) == 0
 
     assert run_mod.main(["status", "--study", path]) == 0
-    line = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("window:"))
+    line = next(
+        item
+        for item in capsys.readouterr().out.splitlines()
+        if item.startswith("window:")
+    )
 
     assert "(default)" not in line, "an unset window must still show real dates"
     assert re.search(r"window:\s+\d{4}-\d{2} \.\. \d{4}-\d{2}", line), line
 
 
 def test_init_hints_point_at_real_commands(tmp_path, capsys):
-    path = _init(tmp_path)
+    _init(tmp_path)
     out = capsys.readouterr().out
     assert "run.py resolve --study" in out
     assert "run.py all --study" in out and "--out" in out
@@ -268,8 +288,19 @@ def test_init_warns_when_the_window_cannot_be_split_comparably(tmp_path, capsys)
     path = str(tmp_path / "study.json")
     assert (
         run_mod.main(
-            ["init", "--topic", "x", "--langs", "pl", "--study", path,
-             "--since", "2023-01", "--until", "2026-08"]
+            [
+                "init",
+                "--topic",
+                "x",
+                "--langs",
+                "pl",
+                "--study",
+                path,
+                "--since",
+                "2023-01",
+                "--until",
+                "2026-08",
+            ]
         )
         == 0
     )
@@ -282,7 +313,8 @@ def test_resolve_has_no_out_flag_because_it_writes_no_results():
     """A flag that does nothing is misleading."""
     parser = run_mod.build_parser()
     resolve_parser = next(
-        action for action in parser._subparsers._group_actions
+        action
+        for action in parser._subparsers._group_actions
         if action.dest == "command"
     ).choices["resolve"]
     assert "--out" not in resolve_parser.format_help()
@@ -308,11 +340,117 @@ def test_status_also_surfaces_the_window_warning(tmp_path, capsys):
     path = str(tmp_path / "study.json")
     assert (
         run_mod.main(
-            ["init", "--topic", "x", "--langs", "pl", "--study", path,
-             "--since", "2023-01", "--until", "2026-08"]
+            [
+                "init",
+                "--topic",
+                "x",
+                "--langs",
+                "pl",
+                "--study",
+                path,
+                "--since",
+                "2023-01",
+                "--until",
+                "2026-08",
+            ]
         )
         == 0
     )
     capsys.readouterr()
     assert run_mod.main(["status", "--study", path]) == 0
     assert "capped at medium" in capsys.readouterr().err
+
+
+# ------------------------------------------------- errors must stay visible --
+def test_run_main_prints_an_error_instead_of_exiting_silently(tmp_path, capsys):
+    """A failure through run.py used to exit 1 with no message at all.
+
+    ``SystemExit("error: ...")`` carries its message as the exit code, and
+    run.main() returned 1 without printing it -- so every CLI error routed
+    through the documented entry point disappeared.
+    """
+    missing = str(tmp_path / "no-such-study.json")
+
+    assert run_mod.main(["status", "--study", missing]) == 1
+
+    err = capsys.readouterr().err
+    assert "error: study manifest not found" in err
+    assert missing in err
+
+
+def test_status_surfaces_an_invalid_window_instead_of_a_plausible_default(
+    tmp_path, capsys
+):
+    """An unresolvable window must not print `(default) .. (default)`."""
+    path = str(tmp_path / "study.json")
+    common.write_json(
+        path,
+        {
+            "topic": "x",
+            "languages": ["pl"],
+            "window": {"since": "2009-01", "until": "2010-01"},
+        },  # pre-2015 era
+    )
+
+    assert run_mod.main(["status", "--study", path]) == 1
+
+    out = capsys.readouterr()
+    assert "no complete months" in out.err
+    assert "(default)" not in out.out
+
+
+def test_init_rejects_an_invalid_window_without_writing_a_manifest(tmp_path, capsys):
+    """Validation happens before the write: a rejected window leaves nothing."""
+    path = str(tmp_path / "study.json")
+
+    assert (
+        run_mod.main(
+            [
+                "init",
+                "--topic",
+                "x",
+                "--langs",
+                "pl",
+                "--study",
+                path,
+                "--since",
+                "2009-01",
+                "--until",
+                "2010-01",
+            ]
+        )
+        == 1
+    )
+    assert "no complete months" in capsys.readouterr().err
+    assert not Path(path).exists(), "a manifest that can never run must not be written"
+
+
+def test_init_rejects_a_malformed_month_flag_as_a_usage_error(tmp_path, capsys):
+    """A non-YYYY-MM --since fails at parse time (exit 2), before any write.
+
+    Verified pre-fix behaviour of resolve_window on such a manifest:
+    ``until=banana`` raised an uncaught ValueError (raw traceback -- run.main
+    catches only ApiError/SystemExit), and ``since=banana`` produced the
+    misleading "requested window banana..2026-08 contains no complete months".
+    Both now stop at the flag, with the flag named.
+    """
+    path = str(tmp_path / "study.json")
+
+    with pytest.raises(SystemExit) as excinfo:
+        run_mod.main(
+            [
+                "init",
+                "--topic",
+                "x",
+                "--langs",
+                "pl",
+                "--study",
+                path,
+                "--since",
+                "banana",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+    assert "YYYY-MM" in capsys.readouterr().err
+    assert not Path(path).exists()

@@ -15,14 +15,13 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
 
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402  (backend must be set first)
-
 import common  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402  (backend must be set first)
+from payloads import AnalysisPayload  # noqa: E402
 
 FIGSIZE = (10, 5)
 DPI = 150
@@ -31,19 +30,31 @@ COLOURS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
 
 
 def _tick_indices(count: int, max_ticks: int = 9) -> list[int]:
+    """Indices of the x-axis labels to show, evenly spaced across the window."""
     if count <= max_ticks:
         return list(range(count))
     step = max(1, count // max_ticks)
     return list(range(0, count, step))
 
 
-def render(analysis: dict[str, Any], out_prefix: Path) -> dict[str, str]:
-    """Write ``<prefix>.png`` and ``<prefix>.svg``. Returns the paths."""
+def render(analysis: AnalysisPayload, out_prefix: Path) -> dict[str, str]:
+    """Write ``<prefix>.png`` and ``<prefix>.svg``.
+
+    Args:
+        analysis: ``analysis.json`` content; languages without a series
+            (coverage gaps) are skipped, and a fully empty set is an error.
+        out_prefix: Output path without extension; parents are created.
+
+    Returns:
+        ``{"png": <path>, "svg": <path>}``.
+
+    Raises:
+        SystemExit: When every requested language is a coverage gap, so
+            there is nothing honest to plot.
+    """
     metrics = analysis["metrics"]
     languages = [
-        lang
-        for lang, m in metrics.items()
-        if m.get("series") and m["series"]["labels"]
+        lang for lang, m in metrics.items() if m.get("series") and m["series"]["labels"]
     ]
     if not languages:
         raise SystemExit(
@@ -60,10 +71,24 @@ def render(analysis: dict[str, Any], out_prefix: Path) -> dict[str, str]:
         colour = COLOURS[index % len(COLOURS)]
         name = f"{language}: {metrics[language]['article_title']}"
 
-        ax_views.plot(x, series["article_views"], marker="o", markersize=3,
-                      linewidth=1.6, color=colour, label=name)
-        ax_share.plot(x, series["share_ppm"], marker="o", markersize=3,
-                      linewidth=1.6, color=colour, label=name)
+        ax_views.plot(
+            x,
+            series["article_views"],
+            marker="o",
+            markersize=3,
+            linewidth=1.6,
+            color=colour,
+            label=name,
+        )
+        ax_share.plot(
+            x,
+            series["share_ppm"],
+            marker="o",
+            markersize=3,
+            linewidth=1.6,
+            color=colour,
+            label=name,
+        )
 
     ax_views.set_ylabel("views / month")
     ax_views.set_title("Absolute monthly pageviews")
@@ -72,9 +97,10 @@ def render(analysis: dict[str, Any], out_prefix: Path) -> dict[str, str]:
     ax_share.set_xlabel("month")
 
     window = analysis["window"]
+    months = window.get("months", len(metrics[languages[0]]["series"]["labels"]))
     fig.suptitle(
         f"{analysis['topic']}  ({window['since']} .. {window['until']}, "
-        f"{window.get('months', len(metrics[languages[0]]['series']['labels']))} months)",
+        f"{months} months)",
         fontsize=12,
     )
     if analysis.get("gaps"):
@@ -91,8 +117,9 @@ def render(analysis: dict[str, Any], out_prefix: Path) -> dict[str, str]:
     labels = metrics[languages[0]]["series"]["labels"]
     indices = _tick_indices(len(labels))
     ax_share.set_xticks(indices)
-    ax_share.set_xticklabels([labels[i] for i in indices], rotation=45, ha="right",
-                             fontsize=8)
+    ax_share.set_xticklabels(
+        [labels[i] for i in indices], rotation=45, ha="right", fontsize=8
+    )
     for axis in (ax_views, ax_share):
         axis.grid(True, alpha=0.3, linewidth=0.6)
         axis.legend(fontsize=8, loc="upper right", framealpha=0.9)
@@ -110,18 +137,24 @@ def render(analysis: dict[str, Any], out_prefix: Path) -> dict[str, str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the ``chart.py`` command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--analysis", default="analysis.json", help="input from analyze.py")
-    parser.add_argument("--out", default="chart", help="output path prefix (no extension)")
+    parser.add_argument(
+        "--analysis", default="analysis.json", help="input from analyze.py"
+    )
+    parser.add_argument(
+        "--out", default="chart", help="output path prefix (no extension)"
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Read ``analysis.json`` and write both chart files."""
     common.configure_console()
     args = build_parser().parse_args(argv)
     analysis = common.read_json(args.analysis)
     paths = render(analysis, Path(args.out))
-    for kind, path in paths.items():
+    for path in paths.values():
         print(f"wrote {path}")
     return 0
 
