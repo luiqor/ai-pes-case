@@ -197,6 +197,155 @@ def test_flat_series_still_draws_a_line():
     assert "nan" not in svg.lower()
 
 
+def test_sparkline_marks_and_labels_where_the_line_lands():
+    """Line only, a dot on the last month, and its label level with that dot."""
+    svg = report_mod.sparkline_svg([1.0, 3.0, 2.0], "#1f77b4", "alt")
+    assert "<polygon" not in svg, "no area fill: the line is the whole chart"
+    # Last of three points lands at x = pad + 2 * (width - 2*pad) / 2.
+    assert '<circle cx="158.0" cy="' in svg, "the end point must be marked"
+    # The label's offset is the drawn end point's position, clamped so a
+    # point at the very edge cannot shove the label out of its tile.
+    assert report_mod.sparkline_end_fraction([1.0, 4.0, 2.0]) > 0.5  # falls
+    assert report_mod.sparkline_end_fraction([1.0, 2.0, 4.0]) < 0.5  # rises
+    assert report_mod.sparkline_end_fraction([4.0, 2.0, 1.0]) == 0.82  # clamped
+    assert report_mod.sparkline_end_fraction([0.0, 6.0]) == 0.18  # clamped
+    assert report_mod.sparkline_end_fraction([2.0]) == 0.5, "no points, no drift"
+
+
+def test_a_tile_labels_its_sparkline_with_the_latest_month(golden_analysis, tmp_path):
+    """The stat above shows the window's average; the label shows where it ended."""
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert html.count('<span class="spark-end" style="--dy:') == len(
+        golden_analysis["metrics"]
+    )
+    for language, metric in golden_analysis["metrics"].items():
+        latest = metric["series"]["share_ppm"][-1]
+        assert f">{latest:.2f}</span></div>" in html, language
+
+
+def test_confidence_gauge_counts_the_grade_as_dots():
+    """Filled dots are the grade: shape, not colour, separates them in greyscale."""
+    assert report_mod.confidence_gauge("high") == (
+        '<span class="gauge" aria-hidden="true">\u25cf\u25cf\u25cf</span>'
+    )
+    assert report_mod.confidence_gauge("medium").endswith(
+        ">\u25cf\u25cf\u25cb</span>"
+    )
+    assert report_mod.confidence_gauge("low").endswith(">\u25cf\u25cb\u25cb</span>")
+    # A gap (or a grade nobody has heard of) must not invent confidence.
+    assert report_mod.confidence_gauge("gap").endswith(">\u25cb\u25cb\u25cb</span>")
+    assert report_mod.confidence_gauge("bogus").endswith(">\u25cb\u25cb\u25cb</span>")
+
+
+def test_every_tile_pairs_its_pill_with_a_meter(gap_analysis, tmp_path):
+    """One meter per tile -- measured tiles meter their grade, gaps their none."""
+    out = tmp_path / "report.html"
+    report_mod.render_html(gap_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert html.count('<span class="gauge"') == (
+        len(gap_analysis["metrics"]) + len(gap_analysis["gaps"])
+    )
+    for metric in gap_analysis["metrics"].values():
+        assert report_mod.confidence_gauge(metric["confidence"]) in html
+    assert '<span class="tile-badges">' in html, "pill and meter travel together"
+
+
+def test_html_hero_sums_the_views_it_labels(golden_analysis, tmp_path):
+    """The hero is the plain total of the per-language counts in the table."""
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    total = sum(
+        int(metric["article_total"]) for metric in golden_analysis["metrics"].values()
+    )
+    assert f'<div class="hero-num">{total:,}</div>' in html
+    assert '<div class="hero-label">Combined views</div>' in html
+    langs = ", ".join(golden_analysis["metrics"])
+    assert f'<div class="hero-sub">{langs}</div>' in html, "say which editions"
+
+
+def test_the_hero_disappears_rather_than_showing_a_fake_zero(golden_analysis):
+    """No measured language means no honest total -- an empty slot, not 0."""
+    analysis = dict(golden_analysis)
+    analysis["metrics"] = {}
+
+    assert report_mod.hero_html(analysis) == ""
+
+
+def test_every_major_section_carries_its_number_in_order(golden_analysis, tmp_path):
+    """The Swiss grid numbers its sections; both artefacts share the digits."""
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert report_mod.SECTION_VERDICT == "01"
+    assert report_mod.SECTION_CHART == "02"
+    assert report_mod.SECTION_TABLE == "03"
+    assert report_mod.SECTION_ASSUMPTIONS == "04"
+
+    marks = [
+        html.index(">01 \u00b7 "),
+        html.index(f'<span class="sec-num">{report_mod.SECTION_CHART}</span>'),
+        html.index(f'<span class="sec-num">{report_mod.SECTION_TABLE}</span>'),
+        html.index(f'<span class="sec-num">{report_mod.SECTION_ASSUMPTIONS}</span>'),
+    ]
+    assert marks == sorted(marks), "numbers must follow the reading order"
+    # The last number announces its own heading rather than floating alone.
+    assert "<h2>" in html[marks[3] : marks[3] + 80]
+
+
+def test_pdf_draws_the_same_section_numbers_as_the_html():
+    """Parity is by construction: render_pdf renders the shared constants."""
+    source = Path(report_mod.__file__).read_text(encoding="utf-8")
+    pdf_body = source.split("def render_pdf(", 1)[1]
+    for constant in (
+        "SECTION_VERDICT",
+        "SECTION_CHART",
+        "SECTION_TABLE",
+        "SECTION_ASSUMPTIONS",
+    ):
+        assert constant in pdf_body, f"render_pdf must draw {constant}"
+
+
+def test_share_cells_carry_a_bar_scaled_against_the_real_maximum(
+    gap_analysis, tmp_path
+):
+    """Bars are a scale, not a second source of truth: the number still shows."""
+    out = tmp_path / "report.html"
+    report_mod.render_html(gap_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    widths = [float(w) for w in re.findall(r"--w:([0-9.]+);--bar:rgba\(", html)]
+    assert len(widths) == len(gap_analysis["metrics"]), "one bar per measured row"
+    assert max(widths) == 1.0, "the largest share defines the scale"
+    assert all(0.0 <= w <= 1.0 for w in widths)
+    # The gap row shows a dash and no bar -- it has no share to scale.
+    gap_row = html.split('<tr class="gap-row">')[1].split("</tr>")[0]
+    assert "--w:" not in gap_row
+
+
+def test_the_print_rules_never_lean_on_backgrounds(golden_analysis, tmp_path):
+    """Borders, rules and words carry the design when backgrounds are dropped."""
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+    css = html.split("<style>", 1)[1].split("</style>", 1)[0]
+
+    assert "@media print" in css and "background: #fff" in css, "white paper"
+    assert "box-shadow" not in css, "no screen chrome print would silently drop"
+    # Masthead rule, verdict accent and badges are borders -- they always print.
+    assert "border-bottom: 3pt solid var(--accent)" in css
+    assert "border-left: 4pt solid var(--accent)" in css
+    assert "border: 1pt solid currentColor" in css, "pills outline, never fill"
+    # Direction and the gap row are words as well as colour.
+    assert "tr.gap-row td { color: var(--gap-fg); font-style: italic;" in css
+
+
 # ------------------------------------------------------------------- PDF ------
 def test_pdf_is_exactly_one_letter_page(golden_analysis, tmp_path):
     out = tmp_path / "report.pdf"

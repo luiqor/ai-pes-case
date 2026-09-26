@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "topic": "astronomy",
+  "languages": [
+    "uk"
+  ],
+  "window": {
+    "since": "2022-09",
+    "until": "2026-08"
+  },
+  "access": "all-access",
+  "agent": "user",
+  "granularity": "monthly",
+  "overrides": {},
+  "resolution": {
+    "topic": "astronomy",
+    "search_language": "en",
+    "qid": "Q333",
+    "label": "astronomy",
+    "description": "natural science studying celestial objects and phenomena in the cosmos",
+    "labels": {
+      "en": "astronomy",
+      "uk": "астрономія"
+    },
+    "languages": [
+      "uk"
+    ],
+    "articles": {
+      "uk": {
+        "title": "Астрономія",
+        "pageid": 827,
+        "source": "sitelink"
+      }
+    },
+    "gaps": [],
+    "candidates": {},
+    "search_hits": [
+      {
+        "id": "Q333",
+        "label": "astronomy",
+        "description": "natural science studying celestial objects and phenomena in the cosmos"
+      },
+      {
+        "id": "Q752075",
+        "label": "Astronomy and Astrophysics",
+        "description": "scientific journal covering theoretical, observational, and instrumental astronomy and astrophysics"
+      },
+      {
+        "id": "Q123958410",
+        "label": "Astronomy",
+        "description": "vocal track by Conan Gray; 2021 studio recording"
+      },
+      {
+        "id": "Q3027134",
+        "label": "Astronomy Reports",
+        "description": "journal"
+      },
+      {
+        "id": "Q263028",
+        "label": "Astronomy Letters",
+        "description": "journal"
+      }
+    ],
+    "warnings": []
+  }
+}

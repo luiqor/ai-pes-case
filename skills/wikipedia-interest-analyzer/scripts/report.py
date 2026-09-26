@@ -44,32 +44,36 @@ MARGIN = 40
 CONTENT_W = PAGE_W - 2 * MARGIN
 BOTTOM = MARGIN
 
-ACCENT = HexColor("#1f4e79")
-ACCENT_DEEP = HexColor("#0f3358")
-GOLD = HexColor("#e0a33e")
+ACCENT = HexColor(common.ACCENT_RED)
 MUTED = HexColor("#666666")
 RULE = HexColor("#d9d9d9")
-VERDICT_BG = HexColor("#f3f7fb")
-HEADER_BG = HexColor("#f0f0f0")
-INK = HexColor("#1a1a1a")
-WHITE = HexColor("#ffffff")
-SUBTITLE_ON_DARK = HexColor("#cfe1f2")
+INK = HexColor("#111111")
+
+# Swiss grid ornament: every major section is announced by its number, in
+# report order. Digits are data, never translated, so they live here rather
+# than in i18n -- and HTML and PDF read them from here, so the two artefacts
+# can never number the same report differently.
+SECTION_VERDICT = "01"
+SECTION_CHART = "02"
+SECTION_TABLE = "03"
+SECTION_ASSUMPTIONS = "04"
 
 # Editorial palette shared with the HTML template (assets/report_template.html).
-ZEBRA = HexColor("#f6f9fc")
 GAP_ROW_BG = HexColor("#fdf4f4")
-UP_FG, UP_BG = HexColor("#127a3e"), HexColor("#e3f5ea")
-DOWN_FG, DOWN_BG = HexColor("#b3261e"), HexColor("#fbe7e5")
-MEDIUM_FG, MEDIUM_BG = HexColor("#8a5b00"), HexColor("#fdf3e0")
+UP_FG = HexColor("#127a3e")
+DOWN_FG = HexColor("#b3261e")
+MEDIUM_FG = HexColor("#8a5b00")
 GAP_FG = HexColor("#a11111")
 FLAT_FG = HexColor("#6b7785")
 
-#: grade -> (pill background, pill text) for the confidence badges.
-GRADE_PILLS: dict[str, tuple[Color, Color]] = {
-    "high": (UP_BG, UP_FG),
-    "medium": (MEDIUM_BG, MEDIUM_FG),
-    "low": (DOWN_BG, DOWN_FG),
-    "gap": (DOWN_BG, GAP_FG),
+# grade -> badge ink. The badge is an outlined tag with no fill (so it
+# survives a printer that drops backgrounds); its word plus the tile's dot
+# meter separate the grades even in greyscale.
+GRADE_INK: dict[str, Color] = {
+    "high": UP_FG,
+    "medium": MEDIUM_FG,
+    "low": DOWN_FG,
+    "gap": GAP_FG,
 }
 
 MAX_CHART_HEIGHT = 250.0
@@ -284,9 +288,20 @@ def table_rows_for(
 
     Returns:
         Row dicts keyed by column name, plus the ``"gap"`` marker and the
-        ``"grade"`` (confidence pill class) presentation hint.
+        presentation hints: ``"grade"`` (confidence pill class), ``"bar"``
+        (Share/M data-bar fraction, empty when there is nothing to scale)
+        and ``"colour"`` (the language's series colour, shared with the
+        chart). The PDF reads only what it draws; the HTML uses the hints.
     """
     tr = translator or i18n.english()
+    # Data bars (HTML only): each Share/M cell's bar is this row's share as a
+    # fraction of the largest measured share, so the bars scale against real
+    # data. Purely presentational -- the number beside it stays the truth,
+    # and the bar can vanish entirely when backgrounds are not printed.
+    peak_share = max(
+        (float(metric["share_ppm"]) for metric in analysis["metrics"].values()),
+        default=0.0,
+    )
     rows: list[dict[str, str]] = []
     for language, metric in analysis["metrics"].items():
         yoy = metric["yoy"]
@@ -294,6 +309,10 @@ def table_rows_for(
             {
                 "gap": "",
                 "grade": metric["confidence"],
+                "bar": (
+                    f"{metric['share_ppm'] / peak_share:.3f}" if peak_share > 0 else ""
+                ),
+                "colour": _colour_for(analysis, language),
                 "Lang": language,
                 "Article": metric["article_title"],
                 "Views": f"{metric['article_total']:,}",
@@ -309,6 +328,8 @@ def table_rows_for(
             {
                 "gap": "gap",
                 "grade": "gap",
+                "bar": "",
+                "colour": "",
                 "Lang": language,
                 "Article": tr.t("report.gap_article"),
                 "Views": "\u2014",
@@ -373,8 +394,59 @@ def confidence_pill_html(grade: str, label: str) -> str:
         The escaped badge markup; an unknown grade degrades to ``pill-gap``
         styling rather than dropping the badge.
     """
-    css = grade if grade in GRADE_PILLS else "gap"
+    css = grade if grade in GRADE_INK else "gap"
     return f'<span class="pill pill-{css}">{html.escape(label)}</span>'
+
+
+def confidence_gauge(grade: str) -> str:
+    """A three-dot meter for a confidence grade: ``<span class="gauge">●●○</span>``.
+
+    Filled dots count the grade (high 3, medium 2, low 1; a coverage gap or
+    an unknown grade reads as none). The meter is decorative (``aria-hidden``)
+    and deliberately *shape*-based, so the grades stay apart in greyscale
+    print even where the badge's colour does not survive.
+
+    Args:
+        grade: ``high``/``medium``/``low`` (or ``gap``/unknown -- no dots).
+
+    Returns:
+        The meter markup with exactly three dots, escaped as literal glyphs.
+    """
+    filled = {"high": 3, "medium": 2, "low": 1}.get(grade, 0)
+    dots = "\u25cf" * filled + "\u25cb" * (3 - filled)
+    return f'<span class="gauge" aria-hidden="true">{dots}</span>'
+
+
+def hero_html(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> str:
+    """The hero number: article views combined over every measured edition.
+
+    One figure for the masthead area -- the verdict says which way interest
+    is moving, this says how many readers it reaches in total. It is the
+    plain sum of the same ``article_total`` values printed per language in
+    the table, so it introduces no data of its own; when nothing is measured
+    there is *no* hero rather than a fabricated 0.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        translator: Target language; English when omitted.
+
+    Returns:
+        The interior HTML for the verdict's hero slot ("" with no metrics).
+    """
+    tr = translator or i18n.english()
+    metrics = analysis["metrics"]
+    if not metrics:
+        return ""
+    total = sum(int(metric["article_total"]) for metric in metrics.values())
+    langs = html.escape(tr.t("join.comma").join(metrics))
+    return (
+        '<div class="hero-rule"></div>'
+        f'<div class="hero-num">{total:,}</div>'
+        f'<div class="hero-label">{html.escape(tr.t("report.hero_label"))}</div>'
+        f'<div class="hero-sub">{langs}</div>'
+    )
 
 
 def _colour_for(analysis: AnalysisPayload, language: str) -> str:
@@ -391,18 +463,78 @@ def _colour_for(analysis: AnalysisPayload, language: str) -> str:
     return common.SERIES_COLOURS[index % len(common.SERIES_COLOURS)]
 
 
+#: Sparkline geometry shared by :func:`sparkline_svg` and
+#: :func:`sparkline_end_fraction`, so the drawn end point and the label that
+#: sits beside it can never disagree about where the line lands.
+SPARK_WIDTH = 160
+SPARK_HEIGHT = 30
+SPARK_PAD = 2.0
+
+
+def spark_points(
+    values: list[float],
+    width: int = SPARK_WIDTH,
+    height: int = SPARK_HEIGHT,
+) -> list[tuple[float, float]]:
+    """Min-max scaled ``values`` as sparkline coordinates (chronological).
+
+    Args:
+        values: The monthly series (share per million), at least two points.
+        width: Viewport width in user units.
+        height: Viewport height in user units.
+
+    Returns:
+        ``(x, y)`` pairs inset by ``SPARK_PAD``; a flat series collapses to a
+        straight horizontal line rather than dividing by zero.
+    """
+    lo, hi = min(values), max(values)
+    span = (hi - lo) or 1.0
+    step = (width - 2 * SPARK_PAD) / (len(values) - 1)
+    return [
+        (
+            SPARK_PAD + index * step,
+            height - SPARK_PAD - ((value - lo) / span) * (height - 2 * SPARK_PAD),
+        )
+        for index, value in enumerate(values)
+    ]
+
+
+def sparkline_end_fraction(values: list[float]) -> float:
+    """Where the sparkline's last point sits, as a fraction of its height.
+
+    Used to place the end-point label *level with the end of the line*
+    (the CSS translates the label by ``(fraction - 0.5) * SPARK_HEIGHT``).
+    The range is clamped so a point at the very edge cannot push the label
+    out of the tile -- at that distance the alignment is decorative anyway.
+
+    Args:
+        values: The monthly series, at least two points.
+
+    Returns:
+        ``0.0`` (top) .. ``1.0`` (bottom), clamped to ``0.18`` .. ``0.82``;
+        ``0.5`` when there is nothing to measure.
+    """
+    if len(values) < 2:
+        return 0.5
+    fraction = spark_points(values)[-1][1] / SPARK_HEIGHT
+    return min(0.82, max(0.18, fraction))
+
+
 def sparkline_svg(
     values: list[float],
     colour: str,
     alt: str,
-    width: int = 160,
-    height: int = 30,
+    width: int = SPARK_WIDTH,
+    height: int = SPARK_HEIGHT,
 ) -> str:
     """A tiny inline SVG line chart of ``values`` (self-contained, no scripts).
 
+    Swiss styling: the line *is* the chart -- no area fill -- with the last
+    month marked by a dot so the label next to the graphic has an anchor.
+
     Args:
         values: The monthly series to plot (share per million).
-        colour: Hex stroke colour; also used for the translucent area fill.
+        colour: Hex stroke colour; also the end-point dot's fill.
         alt: Accessible description (translated by the caller).
         width: Viewport width in user units.
         height: Viewport height in user units.
@@ -413,26 +545,16 @@ def sparkline_svg(
     """
     if len(values) < 2:
         return ""
-    lo, hi = min(values), max(values)
-    span = (hi - lo) or 1.0
-    pad = 2.0
-    step = (width - 2 * pad) / (len(values) - 1)
-    points = [
-        (
-            pad + index * step,
-            height - pad - ((value - lo) / span) * (height - 2 * pad),
-        )
-        for index, value in enumerate(values)
-    ]
+    points = spark_points(values, width, height)
     line = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
-    area = f"{pad:.1f},{height - pad:.1f} {line} {width - pad:.1f},{height - pad:.1f}"
+    end_x, end_y = points[-1]
     label = html.escape(alt)
     return (
         f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{label}" '
         f'preserveAspectRatio="none">'
-        f'<polygon points="{area}" fill="{colour}" opacity="0.13"/>'
         f'<polyline points="{line}" fill="none" stroke="{colour}" '
         f'stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<circle cx="{end_x:.1f}" cy="{end_y:.1f}" r="2.4" fill="{colour}"/>'
         f"</svg>"
     )
 
@@ -444,8 +566,9 @@ def kpi_tiles_for(
 
     Each tile answers "how big, which way, how much do we trust it" without
     reading the table: a big YoY-share number with an arrow, the two
-    supporting counts, a confidence pill and a sparkline of the real monthly
-    share series. Coverage gaps get their own dashed card, so a missing
+    supporting counts, a confidence pill plus its three-dot meter, and a
+    sparkline of the real monthly share series labelled with the latest
+    month's value. Coverage gaps get their own dashed card, so a missing
     article stays visible instead of vanishing from the summary.
 
     Args:
@@ -463,15 +586,32 @@ def kpi_tiles_for(
         share_pct = yoy.get("share_pct")
         kind = trend_class(share_pct)
         series = metric.get("series")
+        values = list(series["share_ppm"]) if series else []
         sparkline = sparkline_svg(
-            list(series["share_ppm"]) if series else [],
+            values,
             _colour_for(analysis, language),
             tr.t("report.sparkline_alt", lang=language),
+        )
+        spark_row = ""
+        if len(values) >= 2:
+            # The label names the *latest* month (the stat above shows the
+            # window's average share) and is translated vertically to sit
+            # level with the dot that marks that month on the line.
+            offset = sparkline_end_fraction(values) - 0.5
+            spark_row = (
+                f'<div class="spark-row">{sparkline}'
+                f'<span class="spark-end" style="--dy:{offset:.3f}">'
+                f"{values[-1]:.2f}</span></div>"
+            )
+        pill = confidence_pill_html(
+            metric["confidence"],
+            tr.t(f"confidence.{metric['confidence']}").upper(),
         )
         tiles.append(
             '<article class="tile" style="--series:{}">'
             '<div class="tile-head">'
-            '<span class="tile-lang">{}</span>{}</div>'
+            '<span class="tile-lang">{}</span>'
+            '<span class="tile-badges">{}{}</span></div>'
             '<div class="tile-title">{}</div>'
             '<div class="tile-hero {}">'
             '<span class="arrow" aria-hidden="true">{}</span>{}</div>'
@@ -482,10 +622,8 @@ def kpi_tiles_for(
             "</div>{}</article>".format(
                 _colour_for(analysis, language),
                 html.escape(language),
-                confidence_pill_html(
-                    metric["confidence"],
-                    tr.t(f"confidence.{metric['confidence']}").upper(),
-                ),
+                pill,
+                confidence_gauge(metric["confidence"]),
                 html.escape(metric["article_title"]),
                 kind,
                 trend_arrow(kind),
@@ -495,15 +633,17 @@ def kpi_tiles_for(
                 html.escape(tr.t("report.kpi_views")),
                 f"{metric['share_ppm']:.2f}",
                 html.escape(tr.t("report.kpi_share")),
-                sparkline,
+                spark_row,
             )
         )
     for language in analysis.get("gaps", []):
+        gap_pill = confidence_pill_html("gap", tr.t("report.gap_confidence"))
         tiles.append(
             '<article class="tile gap-tile">'
             '<div class="tile-head">'
             f'<span class="tile-lang">{html.escape(language)}</span>'
-            f"{confidence_pill_html('gap', tr.t('report.gap_confidence'))}</div>"
+            f'<span class="tile-badges">{gap_pill}{confidence_gauge("gap")}'
+            "</span></div>"
             f'<div class="tile-title">{html.escape(tr.t("report.gap_article"))}</div>'
             '<div class="tile-hero flat"><span class="arrow" aria-hidden="true"></span>'
             f'{html.escape(tr.t("report.na"))}</div>'
@@ -587,11 +727,28 @@ def _render_caveats(
     return list(english_texts or [])
 
 
+def _bar_tint(colour: str) -> str:
+    """A series colour turned into the translucent tint of a Share/M data bar.
+
+    The alpha lives here (rather than in the hex) so the CSS gradient can
+    run from the tint to ``transparent`` at the bar's end using one colour.
+
+    Args:
+        colour: Hex colour in ``#rrggbb`` form (from ``common.SERIES_COLOURS``).
+
+    Returns:
+        ``rgba(...)`` text safe to drop into an inline style attribute.
+    """
+    red, green, blue = (int(colour[index : index + 2], 16) for index in (1, 3, 5))
+    return f"rgba({red}, {green}, {blue}, 0.18)"
+
+
 def _table_cell(name: str, row: dict[str, str]) -> str:
     """One ``<td>``; styled by role, with gap markers preserved.
 
     YoY cells get the trend class (green/red/grey) so direction reads at a
-    glance, and the Confidence cell becomes a pill -- both purely presentational:
+    glance, the Confidence cell becomes a pill, and Share/M carries a
+    data-bar tint scaled by ``row["bar"]`` -- all purely presentational:
     the text inside is exactly what :func:`table_rows_for` produced.
 
     The direction is read from the *sign of the rendered text* (``+``/``-``)
@@ -603,6 +760,14 @@ def _table_cell(name: str, row: dict[str, str]) -> str:
         return f'<td><span class="gap">{value}</span></td>'
     if row["gap"]:
         return f'<td class="flat">{value}</td>'
+    if name == "Share/M" and row.get("bar"):
+        # The bar is a translucent gradient *behind* the number, scaled by
+        # the caller. It is decoration: drop the backgrounds and the cell
+        # still reads as the plain value it was always going to show.
+        return (
+            f'<td class="bar-cell" style="--w:{row["bar"]};'
+            f'--bar:{_bar_tint(row["colour"])}">{value}</td>'
+        )
     if name in {"YoY abs", "YoY share"}:
         if value.startswith("+"):
             kind = "up"
@@ -651,17 +816,22 @@ def render_html(
 
     if chart_png and chart_png.is_file():
         encoded = base64.b64encode(chart_png.read_bytes()).decode("ascii")
-        chart_block = (
+        figure_html = (
             f'<figure><img alt="{html.escape(tr.t("report.chart_alt"))}" '
             f'src="data:image/png;base64,{encoded}"/>'
             f"<figcaption>{html.escape(tr.t('report.chart_caption'))}"
             "</figcaption></figure>"
         )
     else:
-        chart_block = (
+        figure_html = (
             f'<figure class="gap">{html.escape(tr.t("report.chart_missing"))}'
             "</figure>"
         )
+    # Every major section opens with a rule and its number (Swiss grid).
+    chart_block = (
+        f'<div class="sec"><span class="sec-num">{SECTION_CHART}</span>'
+        f"{figure_html}</div>"
+    )
 
     header_cells = "".join(
         f"<th>{html.escape(tr.t(COLUMN_MESSAGES[name]))}</th>"
@@ -672,11 +842,12 @@ def render_html(
     ]
 
     table_block = (
+        f'<div class="sec"><span class="sec-num">{SECTION_TABLE}</span>'
         "<table><thead><tr>"
         + header_cells
         + "</tr></thead><tbody>"
         + "".join(body_rows)
-        + "</tbody></table>"
+        + "</tbody></table></div>"
     )
 
     bullets = "".join(
@@ -688,12 +859,18 @@ def render_html(
     title = tr.t("report.title", topic=str(analysis["topic"]))
     subtitle = subtitle_for(analysis, tr)
     kicker = tr.t("report.kicker")
-    verdict_tag = tr.t("report.verdict_tag")
+    # The tag carries its section number: digits are never translated.
+    verdict_tag = f"{SECTION_VERDICT} \u00b7 {tr.t('report.verdict_tag')}"
     heading = tr.t("report.assumptions_heading")
+    heading_block = (
+        f'<div class="sec"><span class="sec-num">{SECTION_ASSUMPTIONS}</span>'
+        f"<h2>{html.escape(heading)}</h2></div>"
+    )
     footer = footer_for(analysis, tr)
     headline = headline_for(analysis, tr)
     gap_note = gaps_note(analysis, tr)
     kpi_block = kpi_tiles_for(analysis, tr)
+    hero_block = hero_html(analysis, tr)
     note = tr.note()
     note_block = (
         f'<p class="gap"><strong>Warning</strong> ({html.escape(tr.lang)}): '
@@ -710,10 +887,11 @@ def render_html(
         h1=html.escape(title),
         subtitle=html.escape(subtitle),
         headline=html.escape(headline) + gap_note,
+        hero_block=hero_block,
         kpi_block=kpi_block,
         chart_block=chart_block,
         table_block=table_block,
-        heading=html.escape(heading),
+        heading_block=heading_block,
         limitations=bullets,
         note_block=note_block,
         footer=html.escape(footer),
@@ -817,19 +995,24 @@ def _draw_pill(
     row_y: float,
     row_height: float,
 ) -> None:
-    """Draw the confidence badge as a rounded, filled pill.
+    """Draw the confidence badge as an outlined, square-cornered tag.
+
+    No fill on purpose: this is the print-safety rule and the Swiss idiom at
+    once -- a badge that survives a printer dropping backgrounds, where the
+    word inside (and the tile's dot meter) separates the grades even in
+    greyscale.
 
     Args:
         writer: Canvas to draw on.
-        grade: ``high``/``medium``/``low``/``gap`` -- selects the colours;
+        grade: ``high``/``medium``/``low``/``gap`` -- selects the ink;
             an unknown grade degrades to the ``gap`` palette.
         label: Already-translated badge text.
         x: Column left edge.
         width: Column width.
         row_y: Row bottom (the cursor position for this row).
-        row_height: Row height, so the pill centres vertically in it.
+        row_height: Row height, so the tag centres vertically in it.
     """
-    bg, fg = GRADE_PILLS.get(grade, GRADE_PILLS["gap"])
+    ink = GRADE_INK.get(grade, GRADE_INK["gap"])
     size = 7.0
     pill_h = 9.5
     max_w = width - 6
@@ -840,11 +1023,120 @@ def _draw_pill(
     pill_w = min(text_w + 10, max_w)
     pill_x = x + width - 4 - pill_w
     pill_y = row_y + (row_height - pill_h) / 2
-    writer.setFillColor(bg)
-    writer.roundRect(pill_x, pill_y, pill_w, pill_h, pill_h / 2, stroke=0, fill=1)
-    writer.setFillColor(fg)
+    writer.setStrokeColor(ink)
+    writer.setLineWidth(0.7)
+    writer.rect(pill_x, pill_y, pill_w, pill_h, stroke=1, fill=0)
+    writer.setFillColor(ink)
     writer.setFont(FONT_BOLD, size)
-    writer.drawCentredString(pill_x + pill_w / 2, pill_y + 2.6, label)
+    writer.drawCentredString(pill_x + pill_w / 2, pill_y + 3.0, label)
+
+
+#: Vertical space the PDF's hero figure occupies below the verdict box top
+#: (rule, number, label, languages -- see :func:`_draw_hero_pdf`).
+HERO_H = 66.0
+
+
+def _hero_pdf(
+    analysis: AnalysisPayload, translator: i18n.Translator
+) -> tuple[str, str, str, float, float] | None:
+    """Measure the PDF's hero figure: ``(number, label, languages, size, width)``.
+
+    The same combined total :func:`hero_html` prints in the HTML; ``width``
+    is what the verdict text must wrap around. The number shrinks rather
+    than squeeze the sentence when an unusually large total would claim too
+    much of the line.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        translator: Target language (label and language list).
+
+    Returns:
+        The measured block, or ``None`` when nothing is measurable (there
+        is no honest total to show, so the verdict spans the full width).
+    """
+    metrics = analysis["metrics"]
+    if not metrics:
+        return None
+    total = sum(int(metric["article_total"]) for metric in metrics.values())
+    number = f"{total:,}"
+    label = translator.t("report.hero_label").upper()
+    languages = translator.t("join.comma").join(metrics)
+    max_number_w = CONTENT_W * 0.42
+    size = 26.0
+    while size > 14 and (
+        pdfmetrics.stringWidth(number, FONT_BOLD, size) > max_number_w
+    ):
+        size -= 1.0
+    width = max(
+        pdfmetrics.stringWidth(number, FONT_BOLD, size),
+        pdfmetrics.stringWidth(label, FONT_BOLD, 7.0),
+        pdfmetrics.stringWidth(languages, FONT, 7.5),
+    ) + 6
+    return number, label, languages, size, width
+
+
+def _draw_hero_pdf(
+    writer: pdf_canvas.Canvas,
+    hero: tuple[str, str, str, float, float],
+    box_top: float,
+) -> None:
+    """Draw the hero figure flush right inside the verdict box.
+
+    A red rule over a large black numeral with its label underneath: the
+    accent stays a rule (never a fill), and the number is data, so it is
+    drawn in ink rather than colour.
+
+    Args:
+        writer: Canvas to draw on.
+        hero: The measured block from :func:`_hero_pdf`.
+        box_top: Top edge of the verdict box to hang the figure from.
+    """
+    number, label, languages, size, _width = hero
+    right = PAGE_W - MARGIN - 11
+    cursor = box_top - 8
+    writer.setFillColor(ACCENT)
+    writer.rect(right - 44, cursor, 44, 2.5, stroke=0, fill=1)
+    cursor -= 4 + size
+    writer.setFillColor(INK)
+    writer.setFont(FONT_BOLD, size)
+    writer.drawRightString(right, cursor, number)
+    cursor -= 11
+    writer.setFont(FONT_BOLD, 7.0)
+    writer.drawRightString(right, cursor, label)
+    cursor -= 10
+    writer.setFont(FONT, 7.5)
+    writer.setFillColor(MUTED)
+    writer.drawRightString(right, cursor, languages)
+
+
+def _draw_spaced(
+    writer: pdf_canvas.Canvas,
+    text: str,
+    x: float,
+    y: float,
+    font: str,
+    size: float,
+    spacing: float,
+) -> None:
+    """Draw ``text`` at ``(x, y)`` with Swiss-style letterspacing.
+
+    reportlab's canvas exposes no character-spacing state, so spaced caps
+    are drawn glyph by glyph: each one stepped by its own measured width
+    plus ``spacing``.
+
+    Args:
+        writer: Canvas to draw on (the font must already be set).
+        text: The string to draw.
+        x: Left edge of the first glyph.
+        y: Baseline.
+        font: Registered font name used to measure glyph widths.
+        size: Font size in points.
+        spacing: Extra points inserted between glyphs.
+    """
+    cursor = x
+    for char in text:
+        writer.drawString(cursor, y, char)
+        cursor += pdfmetrics.stringWidth(char, font, size) + spacing
 
 
 def render_pdf(
@@ -875,66 +1167,96 @@ def render_pdf(
     writer.setAuthor("wikipedia-interest-analyzer")
     sheet = _Sheet(writer)
 
-    # --- header: accent band with white title (replaces the thin rule) ------
-    # The band is decoration only: it wraps the same two blocks the old header
-    # printed, so the vertical budget grows only by its padding.
+    # --- header: Swiss masthead ---------------------------------------------
+    # Flush-left black type on white paper with one red rule at its foot, and
+    # the kicker (the HTML's, at last) in letterspaced red above the title.
+    # White by design: a printer that drops backgrounds still gets all of it,
+    # because nothing here depends on a fill.
     subtitle = subtitle_for(analysis, tr)
-    title_lines = wrap(title, FONT_BOLD, 17, CONTENT_W - 20)
-    subtitle_lines = wrap(subtitle, FONT, 8, CONTENT_W - 20)
-    band_height = 8 + 21 * len(title_lines) + 11 * len(subtitle_lines) + 8
+    kicker = tr.t("report.kicker")
+    title_lines = wrap(title, FONT_BOLD, 17, CONTENT_W)
+    subtitle_lines = wrap(subtitle, FONT, 8, CONTENT_W)
+    # The kicker is drawn with character spacing, which the wrapper cannot
+    # know: reserve the space it adds (about 1.6pt per character).
+    kicker_lines = wrap(kicker, FONT_BOLD, 7.5, CONTENT_W - 40)
+    band_height = (
+        8
+        + 11 * len(kicker_lines)
+        + 21 * len(title_lines)
+        + 11 * len(subtitle_lines)
+        + 8
+    )
     sheet.need(band_height + 10, "header band")
     band_top = sheet.y + 6
-    writer.setFillColor(ACCENT)
     band_bottom = band_top - band_height
-    writer.rect(MARGIN, band_bottom, CONTENT_W, band_height, stroke=0, fill=1)
     cursor = band_top - 8
+    writer.setFont(FONT_BOLD, 7.5)
+    writer.setFillColor(ACCENT)
+    for line in kicker_lines:
+        cursor -= 11
+        _draw_spaced(writer, line, MARGIN, cursor, FONT_BOLD, 7.5, 1.6)
     writer.setFont(FONT_BOLD, 17)
     for line in title_lines:
         cursor -= 21
-        writer.setFillColor(WHITE)
-        writer.drawString(MARGIN + 10, cursor, line)
+        writer.setFillColor(INK)
+        writer.drawString(MARGIN, cursor, line)
     writer.setFont(FONT, 8)
     for line in subtitle_lines:
         cursor -= 11
-        writer.setFillColor(SUBTITLE_ON_DARK)
-        writer.drawString(MARGIN + 10, cursor, line)
-    writer.setFillColor(GOLD)
-    writer.rect(MARGIN, band_top - band_height, CONTENT_W, 2, stroke=0, fill=1)
+        writer.setFillColor(MUTED)
+        writer.drawString(MARGIN, cursor, line)
+    writer.setFillColor(ACCENT)
+    writer.rect(MARGIN, band_bottom, CONTENT_W, 3, stroke=0, fill=1)
     sheet.y = band_top - band_height - 10
 
-    # --- verdict: dark panel, gold rule and tag ----------------------------
-    # ``headline`` already ends with the coverage-gap sentence when there are
-    # gaps (analyze.py appends it), so the PDF prints it exactly once -- the
-    # old second copy cost one-page space and read as a stutter.
+    # --- verdict: red bar, outlined tag, hero figure ------------------------
+    # No panel fill: white paper, a red bar on the left and a black hairline
+    # to close the block -- so it also survives a printer that drops
+    # backgrounds. ``headline`` already ends with the coverage-gap sentence
+    # when there are gaps (analyze.py appends it), so the PDF prints it
+    # exactly once -- a second copy cost page space and read as a stutter.
     verdict = headline_for(analysis, tr)
-    tag = tr.t("report.verdict_tag").upper()
-    verdict_lines = wrap(verdict, FONT, 9.5, CONTENT_W - 22)
+    tag = f"{SECTION_VERDICT} \u00b7 {tr.t('report.verdict_tag').upper()}"
+    hero = _hero_pdf(analysis, tr)
+    hero_w = hero[4] if hero else 0.0
+    verdict_lines = wrap(verdict, FONT, 9.5, CONTENT_W - 22 - hero_w)
     tag_width = pdfmetrics.stringWidth(tag, FONT_BOLD, 7.0) + 12
-    box_height = 14 + 12.5 * len(verdict_lines) + 16
+    text_height = 14 + 12.5 * len(verdict_lines) + 16
+    box_height = max(text_height, HERO_H if hero else 0.0)
     sheet.need(box_height + 10, "verdict box")
     box_top = sheet.y
-    writer.setFillColor(ACCENT_DEEP)
-    writer.rect(MARGIN, box_top - box_height, CONTENT_W, box_height, stroke=0, fill=1)
-    writer.setFillColor(GOLD)
+    writer.setFillColor(ACCENT)
     writer.rect(MARGIN, box_top - box_height, 3, box_height, stroke=0, fill=1)
-    # Tag chip: sits at the top-left of the panel, above the verdict text.
-    writer.setFillColor(GOLD)
-    writer.roundRect(
-        MARGIN + 11, box_top - 12, tag_width, 11, 5.5, stroke=0, fill=1
-    )
-    writer.setFillColor(ACCENT_DEEP)
+    # Tag: outlined, square-cornered, carrying its section number.
+    writer.setStrokeColor(ACCENT)
+    writer.setLineWidth(0.7)
+    writer.rect(MARGIN + 11, box_top - 12, tag_width, 11, stroke=1, fill=0)
+    writer.setFillColor(ACCENT)
     writer.setFont(FONT_BOLD, 7.0)
     writer.drawCentredString(MARGIN + 11 + tag_width / 2, box_top - 9.5, tag)
-    writer.setFillColor(WHITE)
+    writer.setFillColor(INK)
     writer.setFont(FONT, 9.5)
     cursor = box_top - 22
     for line in verdict_lines:
         cursor -= 12.5
         writer.drawString(MARGIN + 11, cursor, line)
+    if hero:
+        _draw_hero_pdf(writer, hero, box_top)
+    writer.setStrokeColor(INK)
+    writer.setLineWidth(0.75)
+    writer.line(MARGIN, box_top - box_height, PAGE_W - MARGIN, box_top - box_height)
     sheet.y = box_top - box_height - 12
 
     # --- chart -------------------------------------------------------------
     if chart_png and chart_png.is_file():
+        # Section number first: red, flush left, its own thin line.
+        sheet.gap(4)
+        sheet.need(11, "chart section number")
+        sheet.y -= 9
+        writer.setFont(FONT_BOLD, 8)
+        writer.setFillColor(ACCENT)
+        writer.drawString(MARGIN, sheet.y, SECTION_CHART)
+        sheet.gap(4)
         image = ImageReader(str(chart_png))
         image_w, image_h = image.getSize()
         scale = min(CONTENT_W / image_w, MAX_CHART_HEIGHT / image_h)
@@ -962,7 +1284,8 @@ def render_pdf(
     # --- table -------------------------------------------------------------
     rows = table_rows_for(analysis, tr)
     row_height = 12.5
-    sheet.need(16 + row_height * len(rows) + 8, "comparison table")
+    # 15pt of that is the section number's own line above the header rule.
+    sheet.need(15 + 16 + row_height * len(rows) + 8, "comparison table")
 
     x_positions = []
     cursor_x = MARGIN
@@ -970,11 +1293,20 @@ def render_pdf(
         x_positions.append(cursor_x)
         cursor_x += width
 
-    header_top = sheet.y
+    sheet.y -= 11
+    writer.setFont(FONT_BOLD, 8)
     writer.setFillColor(ACCENT)
-    writer.rect(MARGIN, header_top - 16, CONTENT_W, 16, stroke=0, fill=1)
+    writer.drawString(MARGIN, sheet.y, SECTION_TABLE)
+    sheet.gap(4)
+
+    header_top = sheet.y
+    # Swiss table: rules, not a filled band -- the header row is black caps
+    # between a heavy rule above and a hairline below.
+    writer.setStrokeColor(INK)
+    writer.setLineWidth(1.2)
+    writer.line(MARGIN, header_top, PAGE_W - MARGIN, header_top)
     writer.setFont(FONT_BOLD, 7.8)
-    writer.setFillColor(WHITE)
+    writer.setFillColor(INK)
     for (name, width), x in zip(TABLE_COLUMNS, x_positions, strict=True):
         # A translated header can be longer than its fixed column: shorten it
         # rather than let it collide with the neighbour it shares a row with.
@@ -985,14 +1317,13 @@ def render_pdf(
             right = x + width - 4
             writer.drawRightString(right, header_top - 11.5, value)
     sheet.y = header_top - 16
+    writer.setLineWidth(0.5)
+    writer.line(MARGIN, sheet.y, PAGE_W - MARGIN, sheet.y)
 
     for index, row in enumerate(rows):
         sheet.y -= row_height
         if row["gap"]:
             writer.setFillColor(GAP_ROW_BG)
-            writer.rect(MARGIN, sheet.y, CONTENT_W, row_height, stroke=0, fill=1)
-        elif index % 2:
-            writer.setFillColor(ZEBRA)
             writer.rect(MARGIN, sheet.y, CONTENT_W, row_height, stroke=0, fill=1)
         for (name, width), x in zip(TABLE_COLUMNS, x_positions, strict=True):
             value = row[name]
@@ -1009,24 +1340,30 @@ def render_pdf(
                     INK if row["gap"] else _cell_colour(name, value)
                 )
                 writer.drawRightString(x + width - 4, sheet.y + 3.5, value)
-        writer.setStrokeColor(RULE)
-        writer.setLineWidth(0.5)
+        # Hairlines between rows, the accent once under the last one.
+        last = index == len(rows) - 1
+        writer.setStrokeColor(ACCENT if last else RULE)
+        writer.setLineWidth(1.0 if last else 0.5)
         writer.line(MARGIN, sheet.y, PAGE_W - MARGIN, sheet.y)
     sheet.gap(8)
 
     # --- assumptions & limitations ----------------------------------------
     heading = tr.t("report.assumptions_heading").upper()
     sheet.need(12, "limitations heading")
-    writer.setFillColor(GOLD)
-    writer.rect(MARGIN, sheet.y - 10, 3, 10, stroke=0, fill=1)
+    # The section number sits in the left margin, level with the heading's
+    # first line: no extra block, so no extra page space.
+    first_baseline = sheet.y - 12
+    writer.setFont(FONT_BOLD, 8)
+    writer.setFillColor(ACCENT)
+    writer.drawString(MARGIN, first_baseline, SECTION_ASSUMPTIONS)
     sheet.text(
         heading,
         FONT_BOLD,
         8.5,
         12,
-        color=ACCENT,
-        x=MARGIN + 9,
-        max_width=CONTENT_W - 9,
+        color=INK,
+        x=MARGIN + 16,
+        max_width=CONTENT_W - 16,
         what="limitations heading",
     )
     for item in caveat_items(analysis, tr):
@@ -1052,13 +1389,13 @@ def render_pdf(
             9.4,
             indent=10,
             max_width=CONTENT_W,
-            color=HexColor("#a11111"),
+            color=GAP_FG,
             what="untranslated note",
         )
 
     # --- footer ------------------------------------------------------------
     sheet.gap(6)
-    writer.setStrokeColor(RULE)
+    writer.setStrokeColor(INK)
     writer.setLineWidth(0.5)
     writer.line(MARGIN, sheet.y, PAGE_W - MARGIN, sheet.y)
     sheet.gap(0)

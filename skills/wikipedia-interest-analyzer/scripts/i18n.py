@@ -106,6 +106,7 @@ MESSAGES: dict[str, str] = {
     "report.kpi_views": "Total views",
     "report.kpi_share": "Share per million",
     "report.kpi_yoy": "YoY share",
+    "report.hero_label": "Combined views",
     "report.sparkline_alt": "{lang} share per million, month by month",
     "report.trend_up": "trending up",
     "report.trend_down": "trending down",

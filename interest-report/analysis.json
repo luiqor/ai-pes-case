@@ -1,0 +1,309 @@
+{
+  "generated_at": "2026-09-25",
+  "topic": "astronomy",
+  "qid": "Q333",
+  "window": {
+    "since": "2024-09",
+    "until": "2026-08",
+    "months": 24
+  },
+  "parameters": {
+    "access": "all-access",
+    "agent": "user",
+    "granularity": "monthly"
+  },
+  "headline": "Normalised interest in 'astronomy' over 2024-09..2026-08 (second half vs first half): uk -46.4% share (-59.6% absolute). Confidence: uk low.",
+  "headline_i18n": {
+    "id": "headline.main",
+    "params": {
+      "topic": "'astronomy'",
+      "span": "2024-09..2026-08",
+      "parts": {
+        "items": [
+          {
+            "id": "headline.part",
+            "params": {
+              "lang": "uk",
+              "share_pct": "-46.4%",
+              "article_pct": "-59.6%"
+            }
+          }
+        ],
+        "sep": "join.semicolon"
+      },
+      "grades": {
+        "items": [
+          {
+            "id": "headline.grade",
+            "params": {
+              "lang": "uk",
+              "confidence": {
+                "id": "confidence.low"
+              }
+            }
+          }
+        ],
+        "sep": "join.comma"
+      }
+    }
+  },
+  "metrics": {
+    "uk": {
+      "language": "uk",
+      "article_title": "Астрономія",
+      "project": "uk.wikipedia.org",
+      "resolved_via": "sitelink",
+      "native_gap": false,
+      "months": 24,
+      "article_total": 23322,
+      "project_total": 1578818507,
+      "share_ppm": 14.7718,
+      "mean_monthly_views": 971.8,
+      "yoy": {
+        "available": true,
+        "months_each": 12,
+        "first_range": "2024-09..2025-08",
+        "second_range": "2025-09..2026-08",
+        "aligned": true,
+        "dropped_months": [],
+        "article_first": 16614,
+        "article_second": 6708,
+        "article_pct": -59.62,
+        "project_first": 900314093,
+        "project_second": 678504414,
+        "project_pct": -24.64,
+        "share_first_ppm": 18.4536,
+        "share_second_ppm": 9.8865,
+        "share_pct": -46.43
+      },
+      "trend": {
+        "article": {
+          "slope_per_month": -93.2243,
+          "intercept": 2043.83,
+          "r2": 0.4844
+        },
+        "share": {
+          "slope_per_month": -1.0246,
+          "intercept": 25.5265,
+          "r2": 0.365
+        }
+      },
+      "seasonality": {
+        "available": true,
+        "reliable": true,
+        "cycles": 2,
+        "peak_month": 9,
+        "peak_mean": 3164.5,
+        "trough_month": 7,
+        "trough_mean": 313.5,
+        "overall_mean": 971.8,
+        "peak_ratio": 3.256,
+        "profile": {
+          "1": 1003.5,
+          "2": 860.5,
+          "3": 739.0,
+          "4": 712.0,
+          "5": 694.5,
+          "6": 321.0,
+          "7": 313.5,
+          "8": 367.5,
+          "9": 3164.5,
+          "10": 1205.5,
+          "11": 1151.5,
+          "12": 1128.0
+        }
+      },
+      "flags": {
+        "direction_agrees": true,
+        "seasonality_observed": true,
+        "strong_seasonality": true,
+        "small_volume": false
+      },
+      "confidence": "low",
+      "confidence_reasons": [
+        "strongly seasonal (peak month averages 2.0x+ the overall mean)",
+        "seasonality dominates and the linear fit is weak"
+      ],
+      "series": {
+        "labels": [
+          "2024-09",
+          "2024-10",
+          "2024-11",
+          "2024-12",
+          "2025-01",
+          "2025-02",
+          "2025-03",
+          "2025-04",
+          "2025-05",
+          "2025-06",
+          "2025-07",
+          "2025-08",
+          "2025-09",
+          "2025-10",
+          "2025-11",
+          "2025-12",
+          "2026-01",
+          "2026-02",
+          "2026-03",
+          "2026-04",
+          "2026-05",
+          "2026-06",
+          "2026-07",
+          "2026-08"
+        ],
+        "article_views": [
+          4687,
+          1776,
+          1746,
+          1634,
+          1558,
+          1296,
+          1068,
+          1019,
+          789,
+          361,
+          305,
+          375,
+          1642,
+          635,
+          557,
+          622,
+          449,
+          425,
+          410,
+          405,
+          600,
+          281,
+          322,
+          360
+        ],
+        "project_views": [
+          74509285,
+          83014264,
+          83835060,
+          84431475,
+          94111809,
+          81951788,
+          79609260,
+          72146878,
+          69040303,
+          53652676,
+          62209478,
+          61801817,
+          61256706,
+          66044662,
+          67137685,
+          55497356,
+          60471976,
+          51614348,
+          55114806,
+          53385280,
+          55950057,
+          48312008,
+          52999047,
+          50720483
+        ],
+        "share_ppm": [
+          62.9049,
+          21.3939,
+          20.8266,
+          19.353,
+          16.5548,
+          15.8142,
+          13.4155,
+          14.124,
+          11.4281,
+          6.7285,
+          4.9028,
+          6.0678,
+          26.8052,
+          9.6147,
+          8.2964,
+          11.2077,
+          7.4249,
+          8.2341,
+          7.439,
+          7.5864,
+          10.7238,
+          5.8164,
+          6.0756,
+          7.0977
+        ]
+      }
+    }
+  },
+  "comparison": {
+    "by_share_ppm": [
+      {
+        "language": "uk",
+        "share_ppm": 14.7718
+      }
+    ],
+    "by_growth_share_pct": [
+      {
+        "language": "uk",
+        "share_pct": -46.43,
+        "article_pct": -59.62
+      }
+    ],
+    "highest_share": "uk",
+    "fastest_growth": "uk"
+  },
+  "gaps": [],
+  "warnings": [],
+  "assumptions": [
+    "Share = article views / total project views x 1e6; growth counts only when absolute and normalised direction agree.",
+    "Confidence thresholds (R2 0.6/0.4, seasonality 2x, 24 months, 50 views/month) are design parameters, tuned on recorded fixtures."
+  ],
+  "assumptions_i18n": [
+    {
+      "id": "assumption.share"
+    },
+    {
+      "id": "assumption.thresholds"
+    }
+  ],
+  "limitations": [
+    "Pageviews measure article reads, not willingness to pay -- treat this as a direction indicator, not a market size.",
+    "Interest is proxied by one article per language edition; how much of the topic each article covers can differ between editions.",
+    "Requests used access=all-access, agent=user (bots excluded); Wikimedia rate limits were not probed, so requests are sequential with a fixed delay.",
+    "Growth compares the second half of the window with the first half (design choice; see references/methods.md).",
+    "Seasonal signal detected -- uk peaks in calendar month 9 (3.256x the overall mean). A single seasonal cycle can dominate a short window."
+  ],
+  "limitations_i18n": [
+    {
+      "id": "limitation.pageviews"
+    },
+    {
+      "id": "limitation.proxy"
+    },
+    {
+      "id": "limitation.requests",
+      "params": {
+        "access": "all-access",
+        "agent": "user"
+      }
+    },
+    {
+      "id": "limitation.growth"
+    },
+    {
+      "id": "limitation.seasonal",
+      "params": {
+        "items": {
+          "items": [
+            {
+              "id": "limitation.seasonal_item",
+              "params": {
+                "lang": "uk",
+                "month": 9,
+                "ratio": 3.256
+              }
+            }
+          ],
+          "sep": "join.semicolon"
+        }
+      }
+    }
+  ]
+}

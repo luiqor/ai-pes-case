@@ -72,6 +72,7 @@ __all__ = [
     "MAX_ATTEMPTS",
     "BACKOFF_SECONDS",
     "SERIES_COLOURS",
+    "ACCENT_RED",
     # leaf utilities
     "clear_cache",
     "clip",
@@ -136,6 +137,12 @@ CACHE_DIR = _cache_dir_from_env()
 # One source of truth so a language is the *same* colour in the chart, in the
 # report's sparklines and on its KPI tiles (index = position in the payload).
 SERIES_COLOURS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+
+# The report's single rationed accent (Swiss red): rules, tags, section
+# numbers, the chart's title rule -- never a large fill. No brand owns it, so
+# it is a design choice, not a verified logo value. Shared by the chart and
+# the report so both artefacts carry exactly the same red.
+ACCENT_RED = "#e30613"
 
 # The numeric rate limit was deliberately never measured. Stay conservative:
 # one request at a time with a fixed gap, and back off hard on 429/5xx.

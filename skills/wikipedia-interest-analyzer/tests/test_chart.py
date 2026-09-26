@@ -76,3 +76,19 @@ def test_english_chart_is_unchanged_by_the_translator_default(
 
     assert "views / month" in svg
     assert "no article in" in svg or "pl" in svg
+
+
+# ------------------------------------------------------------ Swiss styling ---
+def test_chart_carries_the_report_accent_and_the_shared_series_palette(
+    golden_analysis, tmp_path
+):
+    """One rationed red rule over the title; languages keep their own colours."""
+    chart_mod.render(golden_analysis, tmp_path / "chart")
+    svg = (tmp_path / "chart.svg").read_text(encoding="utf-8")
+
+    assert f"stroke: {chart_mod.ACCENT}" in svg, (
+        "the title rule must be the same red the report uses"
+    )
+    assert "stroke: #1f77b4" in svg, (
+        "series stay on common.SERIES_COLOURS: one palette across every artefact"
+    )
