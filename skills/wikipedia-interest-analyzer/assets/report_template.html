@@ -133,6 +133,19 @@
   td.flat { color: var(--flat); }
   tr.gap-row td { color: var(--gap-fg); font-style: italic; }
 
+  /* ---- key under the table: what each abbreviated header means ---- */
+  .table-key { margin: -6pt 0 12pt; }
+  .table-key h3 {
+    font-size: 7.5pt; margin: 0 0 3pt; color: var(--accent);
+    text-transform: uppercase; letter-spacing: .8pt;
+  }
+  .table-key dl {
+    display: grid; grid-template-columns: max-content minmax(0, 1fr);
+    gap: 1pt 8pt; margin: 0; font-size: 7.5pt; line-height: 1.35;
+  }
+  .table-key dt { font-weight: 700; color: var(--accent); white-space: nowrap; }
+  .table-key dd { margin: 0; color: var(--muted); }
+
   /* ---- caveats ---- */
   h2 {
     font-size: 9.5pt; margin: 0 0 5pt; color: var(--accent);
@@ -176,6 +189,8 @@ $kpi_block
 $chart_block
 
 $table_block
+
+$legend_block
 
 <h2>$heading</h2>
 <ul>

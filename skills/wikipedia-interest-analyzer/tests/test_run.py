@@ -51,6 +51,19 @@ def _init(tmp_path) -> str:
     return path
 
 
+def _set_table_key(path: str, marker: str = "") -> None:
+    """Arrange: give the manifest its generated (never translated) table key."""
+    study = common.read_json(path)
+    study["table_key"] = {
+        "heading": f"{marker} Table key",
+        "Share/M": f"{marker} share definition",
+        "YoY": f"{marker} YoY definition",
+        "YoY share": f"{marker} YoY share definition",
+        "R²": f"{marker} R2 definition",
+    }
+    common.write_json(path, study)
+
+
 def test_init_writes_a_manifest(tmp_path):
     path = str(tmp_path / "study.json")
     assert run_mod.main([*GOLDEN_INIT_ARGS, "--study", path]) == 0
@@ -530,6 +543,7 @@ def test_a_first_localised_run_writes_the_reference_and_says_so(tmp_path, capsys
 def test_a_translated_rerun_localises_the_report_and_the_chart(tmp_path, capsys):
     """The whole point: edit the reference, rerun, get a localised output."""
     path = _init(tmp_path)
+    _set_table_key(path, "[xx]")
     out = tmp_path / "out"
     assert (
         run_mod.main(["all", "--study", path, "--out", str(out), "--report-lang", "xx"])
@@ -554,6 +568,63 @@ def test_a_translated_rerun_localises_the_report_and_the_chart(tmp_path, capsys)
     # The chart is report-facing text too, so it moves with the same language.
     svg = (out / "chart.svg").read_text(encoding="utf-8")
     assert "[xx] Absolute monthly pageviews" in svg
+
+
+def test_the_manifest_table_key_reaches_the_report(tmp_path):
+    """The decoding under the table comes from study.json, not the catalogue."""
+    path = _init(tmp_path)
+    _set_table_key(path, "Пояснення:")
+    out = tmp_path / "out"
+
+    assert run_mod.main(["all", "--study", path, "--out", str(out)]) == 0
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert "<h3>Пояснення: Table key</h3>" in html
+    assert "<dt>Share/M</dt><dd>Пояснення: share definition</dd>" in html
+    # Metric names never move, whatever the manifest says.
+    assert "<th>Share/M</th>" in html
+    assert "<h1>Audience interest:" in html, "an English report stays English"
+    # A manifest that supplies the whole key needs no note about it.
+    assert "Untranslated text" not in html
+
+
+def test_an_unknown_table_key_entry_is_reported(tmp_path, capsys):
+    """A definition for a column the table never prints is work, not silence."""
+    path = _init(tmp_path)
+    study = common.read_json(path)
+    study["table_key"] = {"heading": "Key", "Momentum": "not a column"}
+    common.write_json(path, study)
+    out = tmp_path / "out"
+    capsys.readouterr()
+
+    assert run_mod.main(["all", "--study", path, "--out", str(out)]) == 0
+
+    assert "Momentum" in capsys.readouterr().err
+
+
+def test_a_localised_report_without_a_manifest_key_admits_the_english_fallback(
+    tmp_path, capsys
+):
+    """Complete translation, no ``table_key``: the key falls back *and* says so."""
+    path = _init(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    common.write_json(
+        out / "translations.xx.json",
+        {"lang": "xx", "messages": full_translation("xx")},
+    )
+    capsys.readouterr()
+
+    assert (
+        run_mod.main(["all", "--study", path, "--out", str(out), "--report-lang", "xx"])
+        == 0
+    )
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert '<html lang="xx">' in html
+    assert "<dt>YoY</dt><dd>Change in article pageviews" in html
+    assert "Untranslated text:" in html
+    assert "table_key" in capsys.readouterr().err
 
 
 def test_the_manifest_report_language_applies_without_the_flag(tmp_path):

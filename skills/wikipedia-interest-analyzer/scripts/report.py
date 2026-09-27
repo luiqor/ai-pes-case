@@ -23,7 +23,9 @@ import base64
 import html
 import string
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import TextIO
 
 import common
 import i18n
@@ -74,30 +76,54 @@ GRADE_PILLS: dict[str, tuple[Color, Color]] = {
 
 MAX_CHART_HEIGHT = 250.0
 
+#: Printed column headers and their widths in points; the widths add up to
+#: ``CONTENT_W`` exactly, so the grid fills the page edge to edge.
+#:
+#: The labels are **not translatable** -- a metric name is a code, and a
+#: column this narrow cannot hold a translated phrase anyway. The decoding a
+#: reader needs is printed under the table from the manifest's ``table_key``
+#: block (:func:`table_key_items`), never from the translation catalogue.
 TABLE_COLUMNS = [
     ("Lang", 34),
     ("Article", 118),
     ("Views", 62),
-    ("Share/M", 56),
-    ("YoY abs", 58),
-    ("YoY share", 62),
-    ("R\u00b2", 38),
-    ("Confidence", 104),
+    ("Share/M", 60),
+    ("YoY", 52),
+    ("YoY share", 64),
+    ("R\u00b2", 32),
+    ("Confidence", 110),
 ]
 ALIGN_LEFT = {"Lang", "Article"}
 
-# Which message carries each column's header. The *keys* stay English (they
-# are also the row keys and the payload vocabulary); only the printed label is
-# translated, so a localised table cannot drift from the data behind it.
-COLUMN_MESSAGES = {
-    "Lang": "report.col_lang",
-    "Article": "report.col_article",
-    "Views": "report.col_views",
-    "Share/M": "report.col_share",
-    "YoY abs": "report.col_yoy_abs",
-    "YoY share": "report.col_yoy_share",
-    "R\u00b2": "report.col_r2",
-    "Confidence": "report.col_confidence",
+#: Columns whose header is an abbreviation: these must be defined under the
+#: table, so each ships with an English fallback (:data:`TABLE_KEY_DEFAULTS`).
+#: The plain columns ("Lang", "Article", "Views", "Confidence") read as their
+#: own definition and need no entry -- an agent may still supply one.
+TABLE_KEY_COLUMNS = ("Share/M", "YoY", "YoY share", "R\u00b2")
+
+#: Heading of the key when the manifest does not carry its own.
+TABLE_KEY_HEADING = "Table key"
+
+#: Last-resort wording for a ``TABLE_KEY_COLUMNS`` entry the manifest omits.
+#: These are deliberately plain English and deliberately *not* translatable:
+#: a report that falls back here says so in its untranslated note.
+TABLE_KEY_DEFAULTS: dict[str, str] = {
+    "Share/M": (
+        "Article views as a share of all reading in that edition, per million "
+        "edition views."
+    ),
+    "YoY": (
+        "Change in article pageviews, second half of the window against the "
+        "first half."
+    ),
+    "YoY share": (
+        "The same comparison applied to the normalised share, so overall wiki "
+        "growth cancels out."
+    ),
+    "R\u00b2": (
+        "How much of the month-to-month variation a straight line explains "
+        "(0 to 1)."
+    ),
 }
 
 
@@ -298,7 +324,7 @@ def table_rows_for(
                 "Article": metric["article_title"],
                 "Views": f"{metric['article_total']:,}",
                 "Share/M": f"{metric['share_ppm']:.2f}",
-                "YoY abs": fmt_pct(yoy.get("article_pct"), tr),
+                "YoY": fmt_pct(yoy.get("article_pct"), tr),
                 "YoY share": fmt_pct(yoy.get("share_pct"), tr),
                 "R\u00b2": f"{metric['trend']['share']['r2']:.2f}",
                 "Confidence": tr.t(f"confidence.{metric['confidence']}").upper(),
@@ -313,7 +339,7 @@ def table_rows_for(
                 "Article": tr.t("report.gap_article"),
                 "Views": "\u2014",
                 "Share/M": "\u2014",
-                "YoY abs": "\u2014",
+                "YoY": "\u2014",
                 "YoY share": "\u2014",
                 "R\u00b2": "\u2014",
                 "Confidence": tr.t("report.gap_confidence"),
@@ -335,6 +361,161 @@ def gaps_note(
         langs=tr.t("join.comma").join(gaps),
     )
     return f' <span class="gap">{html.escape(note)}</span>'
+
+
+def table_key_items(
+    table_key: Mapping[str, str] | None = None,
+    translator: i18n.Translator | None = None,
+) -> list[tuple[str, str]]:
+    """The ``(header, definition)`` pairs printed as the key under the table.
+
+    Metric names are codes, so their decoding is *generated, not translated*:
+    the wording comes from the study manifest's ``table_key`` block, written
+    once per study by whoever runs the skill. A column in
+    :data:`TABLE_KEY_COLUMNS` whose wording is missing falls back to
+    :data:`TABLE_KEY_DEFAULTS` and is recorded on the translator, so a report
+    that had to use the English fallback admits it instead of looking
+    finished.
+
+    Columns outside :data:`TABLE_KEY_COLUMNS` are printed only when the
+    manifest supplies them -- they read as their own definition otherwise.
+
+    Both renderers consume this list, so the HTML and PDF keys cannot
+    disagree.
+
+    Args:
+        table_key: The manifest block (``column -> definition``), or None.
+        translator: Target language; used only to record the English
+            fallbacks, never to rewrite the supplied wording.
+
+    Returns:
+        One pair per column that has something to say, in table order.
+    """
+    tr = translator or i18n.english()
+    supplied = dict(table_key or {})
+    items: list[tuple[str, str]] = []
+    for name, _ in TABLE_COLUMNS:
+        definition = supplied.get(name)
+        if not definition:
+            if name not in TABLE_KEY_COLUMNS:
+                continue
+            definition = TABLE_KEY_DEFAULTS[name]
+            tr.mark_untranslated("table_key")
+        items.append((name, definition))
+    return items
+
+
+def table_key_heading(
+    table_key: Mapping[str, str] | None = None,
+    translator: i18n.Translator | None = None,
+) -> str:
+    """The line above the key: the manifest's ``heading``, else English.
+
+    Args:
+        table_key: The manifest block; ``"heading"`` is its optional title.
+        translator: Target language, used only to record a fallback.
+
+    Returns:
+        The heading to print. An absent one is admitted as untranslated in a
+        localised report rather than silently switching the reader's language.
+    """
+    tr = translator or i18n.english()
+    heading = (table_key or {}).get("heading")
+    if not heading:
+        tr.mark_untranslated("table_key")
+        return TABLE_KEY_HEADING
+    return heading
+
+
+def warn_unknown_table_key(
+    table_key: Mapping[str, str] | None, stream: TextIO | None = None
+) -> None:
+    """Warn about ``table_key`` entries naming a column the table never prints.
+
+    A definition the report silently drops is work thrown away, so the run
+    says so instead. Valid non-column keys (``heading``) are never flagged.
+
+    Args:
+        table_key: The manifest block, possibly None.
+        stream: Where the warning goes (stderr by default, resolved at call
+            time so a redirected stderr actually receives it).
+    """
+    if not table_key:
+        return
+    columns = {name for name, _ in TABLE_COLUMNS}
+    unknown = sorted(
+        key for key in table_key if key != "heading" and key not in columns
+    )
+    if unknown:
+        print(
+            "warning: table_key entries with no matching table column "
+            f"(ignored): {', '.join(unknown)}",
+            file=stream if stream is not None else sys.stderr,
+        )
+
+
+def load_table_key(path: Path) -> dict[str, str] | None:
+    """Read the ``table_key`` block out of a study manifest.
+
+    The report stage is also usable on its own, without the runner, so a
+    missing manifest is simply "no key supplied" -- the English defaults take
+    over. A manifest that *is* there but is malformed must stop the run: a
+    key built from silently-coerced values would be worse than no key.
+
+    Args:
+        path: Manifest to read; absent yields None.
+
+    Returns:
+        The block as ``column -> text``, or None when there is nothing to use.
+
+    Raises:
+        SystemExit: If the manifest cannot be read, or ``table_key`` is not
+            an object of strings.
+    """
+    if not path.is_file():
+        return None
+    study = common.read_json(path)
+    block = study.get("table_key") if isinstance(study, dict) else None
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise SystemExit(
+            f"error: 'table_key' in {path} must be an object mapping column "
+            "names to definitions"
+        )
+    bad = [key for key, value in block.items() if not isinstance(value, str)]
+    if bad:
+        raise SystemExit(
+            f"error: table_key values in {path} must be strings "
+            f"(bad: {', '.join(str(key) for key in bad)})"
+        )
+    return {str(key): value for key, value in block.items()}
+
+
+def table_key_block(
+    table_key: Mapping[str, str] | None = None,
+    translator: i18n.Translator | None = None,
+) -> str:
+    """HTML for the key under the table (``""`` when no column needs one).
+
+    Args:
+        table_key: The manifest block (see :func:`table_key_items`).
+        translator: Target language; English when omitted.
+
+    Returns:
+        A ``<section class="table-key">`` block, or an empty string when
+        :func:`table_key_items` has nothing to explain.
+    """
+    tr = translator or i18n.english()
+    items = table_key_items(table_key, tr)
+    if not items:
+        return ""
+    heading = html.escape(table_key_heading(table_key, tr))
+    entries = "".join(
+        f"<dt>{html.escape(code)}</dt><dd>{html.escape(definition)}</dd>"
+        for code, definition in items
+    )
+    return f'<section class="table-key"><h3>{heading}</h3><dl>{entries}</dl></section>'
 
 
 # --------------------------------------------------------------------------
@@ -603,7 +784,7 @@ def _table_cell(name: str, row: dict[str, str]) -> str:
         return f'<td><span class="gap">{value}</span></td>'
     if row["gap"]:
         return f'<td class="flat">{value}</td>'
-    if name in {"YoY abs", "YoY share"}:
+    if name in {"YoY", "YoY share"}:
         if value.startswith("+"):
             kind = "up"
         elif value.startswith("-"):
@@ -632,6 +813,8 @@ def render_html(
     chart_png: Path | None,
     out_path: Path,
     translator: i18n.Translator | None = None,
+    *,
+    table_key: Mapping[str, str] | None = None,
 ) -> None:
     """Write the self-contained HTML report (chart embedded as base64).
 
@@ -641,6 +824,9 @@ def render_html(
             placeholder note rather than breaking the report.
         out_path: Output file; parent directories are created.
         translator: Target language; English when omitted.
+        table_key: The manifest's ``table_key`` block -- the agent-written
+            decoding printed under the table. Absent means the English
+            defaults, recorded as untranslated in a localised report.
 
     Raises:
         OSError: If the template or output cannot be read/written.
@@ -664,7 +850,7 @@ def render_html(
         )
 
     header_cells = "".join(
-        f"<th>{html.escape(tr.t(COLUMN_MESSAGES[name]))}</th>"
+        f"<th>{html.escape(name)}</th>"
         for name, _ in TABLE_COLUMNS
     )
     body_rows = [
@@ -678,6 +864,9 @@ def render_html(
         + "".join(body_rows)
         + "</tbody></table>"
     )
+    # The key sits with the table it decodes, not with the caveats: a reader
+    # who does not know what "YoY" means should not have to scroll for it.
+    legend_block = table_key_block(table_key, tr)
 
     bullets = "".join(
         f"<li>{html.escape(item)}</li>" for item in caveat_items(analysis, tr)
@@ -713,6 +902,7 @@ def render_html(
         kpi_block=kpi_block,
         chart_block=chart_block,
         table_block=table_block,
+        legend_block=legend_block,
         heading=html.escape(heading),
         limitations=bullets,
         note_block=note_block,
@@ -800,7 +990,7 @@ def _cell_colour(name: str, value: str) -> Color:
     Returns:
         Reportlab colour to draw the value in.
     """
-    if name in {"YoY abs", "YoY share"}:
+    if name in {"YoY", "YoY share"}:
         if value.startswith("+"):
             return UP_FG
         if value.startswith("-"):
@@ -852,6 +1042,8 @@ def render_pdf(
     chart_png: Path | None,
     out_path: Path,
     translator: i18n.Translator | None = None,
+    *,
+    table_key: Mapping[str, str] | None = None,
 ) -> None:
     """Write the strictly-one-page PDF, or raise ``ReportOverflow``.
 
@@ -864,6 +1056,9 @@ def render_pdf(
         chart_png: Chart to draw scaled; ignored when missing/unreadable.
         out_path: Output file; the caller decides what to do on failure.
         translator: Target language; English when omitted.
+        table_key: The manifest's ``table_key`` block -- the agent-written
+            decoding printed under the table. Absent means the English
+            defaults, recorded as untranslated in a localised report.
 
     Raises:
         ReportOverflow: When any block would cross the bottom margin.
@@ -978,7 +1173,7 @@ def render_pdf(
     for (name, width), x in zip(TABLE_COLUMNS, x_positions, strict=True):
         # A translated header can be longer than its fixed column: shorten it
         # rather than let it collide with the neighbour it shares a row with.
-        value = fit(tr.t(COLUMN_MESSAGES[name]), FONT_BOLD, 7.8, width - 8)
+        value = fit(name, FONT_BOLD, 7.8, width - 8)
         if name in ALIGN_LEFT:
             writer.drawString(x + 4, header_top - 11.5, value)
         else:
@@ -1013,6 +1208,33 @@ def render_pdf(
         writer.setLineWidth(0.5)
         writer.line(MARGIN, sheet.y, PAGE_W - MARGIN, sheet.y)
     sheet.gap(8)
+
+    # --- key under the table ------------------------------------------------
+    # The headers are short codes; their wording is drawn here, a few points
+    # below the grid, so a reader meets the decoding while the table is still
+    # in view rather than down among the caveats.
+    key_items = table_key_items(table_key, tr)
+    if key_items:
+        sheet.gap(2)
+        sheet.text(
+            table_key_heading(table_key, tr),
+            FONT_BOLD,
+            7.5,
+            9.5,
+            color=ACCENT,
+            what="table key heading",
+        )
+        for code, definition in key_items:
+            sheet.text(
+                f"{code} \u2014 {definition}",
+                FONT,
+                7.0,
+                8.8,
+                indent=8,
+                color=MUTED,
+                what="table key entry",
+            )
+        sheet.gap(4)
 
     # --- assumptions & limitations ----------------------------------------
     heading = tr.t("report.assumptions_heading").upper()
@@ -1085,6 +1307,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="report language code (default: English), e.g. pl",
     )
     parser.add_argument(
+        "--study",
+        default="study.json",
+        help="study manifest carrying the table_key block (optional)",
+    )
+    parser.add_argument(
         "--translations",
         default="",
         help="translations JSON (default: translations.<lang>.json)",
@@ -1104,20 +1331,25 @@ def main(argv: list[str] | None = None) -> int:
     analysis = common.read_json(args.analysis)
     chart = Path(args.chart) if args.chart else None
 
+    # The decoding under the table comes from the manifest, never from the
+    # translation catalogue: it is generated once per study, not translated.
+    table_key = load_table_key(Path(args.study))
+    warn_unknown_table_key(table_key)
+
     lang = i18n.normalize_lang(args.report_lang)
     fallback = Path(f"translations.{lang}.json")
     translations = Path(args.translations) if args.translations else fallback
     translator = i18n.translator_for(lang, translations)
 
     html_path = Path(args.html)
-    render_html(analysis, chart, html_path, translator)
+    render_html(analysis, chart, html_path, translator, table_key=table_key)
     print(f"wrote {html_path}")
 
     status = 0
     pdf_path = Path(args.pdf)
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        render_pdf(analysis, chart, pdf_path, translator)
+        render_pdf(analysis, chart, pdf_path, translator, table_key=table_key)
     except ReportOverflow as exc:
         print(f"error: {exc}", file=sys.stderr)
         print(

@@ -25,7 +25,7 @@ similar article.**
 ```bash
 cd skills/wikipedia-interest-analyzer
 uv sync                      # installs pinned deps from uv.lock
-uv run pytest                # optional: 224 offline tests, ~10s
+uv run pytest                # optional: 246 offline tests, ~10s
 ```
 
 **Treat the skill directory as read-only.** Every command takes `--study` (the
@@ -147,13 +147,43 @@ unless they ask for another one. Pick the code yourself (`pl`, `cs`, `de`,
    then carries a visible `Warning (pl): Untranslated text: …` note naming
    them, and stderr lists every id. **Never fail and never fall back
    silently.**
+4. Write the `table_key` block into `study.json` once (see below): it is the
+   one part of a localised report that is *generated* rather than translated.
+
+**Table headers are fixed English codes; the report defines them under the
+table.** `Share/M`, `YoY`, `YoY share`, `R²`, `Lang`, `Article`, `Views`,
+`Confidence` are printed as-is in every language and are **not** part of the
+translation: they are codes, not prose, and a translated header has nowhere
+to fit in a narrow column anyway. You supply the decoding **once per study**,
+in the manifest (`study.json`):
+
+```json
+{
+  "table_key": {
+    "heading": "How to read this table",
+    "Share/M": "Share of that language edition's monthly pageviews, per million",
+    "YoY": "Change in article pageviews versus the same month last year, in %",
+    "YoY share": "Same year-on-year move, but for the normalised share",
+    "R²": "How much of the trend a straight line explains (1 = perfectly linear)"
+  }
+}
+```
+
+Write it in the report's language, in your own words — the report prints it
+verbatim as a **table key directly under the comparison table**, in both HTML
+and the PDF, so wording is yours to generate, never to look up. The keys are
+the printed column names; an entry naming a column the table never prints is
+warned about on stderr (the `heading` key is the block's own title). Omit the
+block and the shipped English wording is used, admitted in the visible
+fallback note like any other missing string.
 
 What stays English, deliberately: `analysis.json` (the data contract your
 answer is built from), `series.json`, the console progress/warning wording,
-and message ids everywhere. Numbers, article titles, language codes and the
-topic concept are never translated. The `Warning (pl):` prefix on the
-fallback note is fixed English so a partially-translated report still admits
-it in any language.
+message ids everywhere, and the table headers themselves — `Share/M`, `YoY`,
+`Confidence` are codes the table key then explains. Numbers, article titles,
+language codes and the topic concept are never translated. The `Warning (pl):`
+prefix on the fallback note is fixed English so a partially-translated report
+still admits it in any language.
 
 ## Answering the user's question
 
@@ -193,6 +223,7 @@ with the same `--study`/`--out`:
 | Longer window | `study.json` → `"window": {"since": "2023-01", "until": "2026-08"}` — **use 23/24 or 47/48 months**, or the halves stop being the same calendar months and confidence is capped at `medium` (`init` warns) |
 | Different concept | re-run `init --force --study …`, or pass `--qid Q…` to `resolve`/`all` |
 | Report in another language | `run.py all --report-lang <code> …` (or `init --report-lang`); translate the new `translations.<code>.json` |
+| Explain the table differently | `study.json` → `"table_key"` block (`"heading"` plus one entry per abbreviated column); printed verbatim as the key under the table |
 | Try a substitute | `run.py override --lang … --title … --study …` |
 | Force fresh data | `run.py all --no-cache --study … --out …` |
 
@@ -217,7 +248,9 @@ with the same `--study`/`--out`:
    `translations.<lang>.json`, never by editing templates or shipped code.
    Anything untranslated falls back to English *with a visible note* —
    partial output is admitted, never hidden. Data files and console wording
-   stay English.
+   stay English. Table headers stay English codes too: their wording lives in
+   the manifest's `table_key` block, which you write once, in the report's
+   language, and which the report prints as the key under the table.
 
 ## When something goes wrong
 
@@ -233,7 +266,8 @@ with the same `--study`/`--out`:
 | `no data for those date(s)` | valid request, nothing in that range; check the window is after 2015-07 |
 | `series.json not found -- run 'run.py all --stage fetch' first` | stages are ordered; run the earlier one (or just `all`) |
 | `warning: no translations for 'pl' at …` | first run in that language; the English reference was written — translate it and rerun |
-| `Warning (pl): Untranslated text: N of M …` | that many report strings had no translation and are in English; fill them in `translations.pl.json` and rerun |
+| `Warning (pl): Untranslated text: N of M …` | that many report strings had no translation and are in English; fill them in `translations.pl.json` and rerun — a `table_key` entry there means the manifest has no `table_key` block |
+| `table_key entries with no matching table column (ignored): …` | that key names a column the table never prints; fix or drop the entry in `study.json` |
 | `error: cannot read translations …` | the file is not valid JSON; fix it (a corrupt file stops the run rather than rendering English silently) |
 | `<path> already exists (use --force …)` | `i18n-template` will not overwrite a finished translation; add `--force` only to reset it |
 | `UnicodeEncodeError` printing a title | fixed by `common.configure_console()`; if you add a new entry point, call it |

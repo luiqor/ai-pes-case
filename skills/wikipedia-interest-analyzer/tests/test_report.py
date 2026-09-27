@@ -8,6 +8,7 @@ If the content cannot fit, ``ReportOverflow`` is raised and no PDF is written
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -158,6 +159,189 @@ def test_gap_rows_carry_the_row_level_gap_class(gap_analysis, tmp_path):
 
     assert '<tr class="gap-row">' in html
     assert html.count('<tr class="gap-row">') == len(gap_analysis["gaps"])
+
+
+# ------------------------------------------------------------- table key -----
+#: A manifest block that defines every abbreviated column plus the heading --
+#: the shape ``study.json`` is expected to carry once the agent has written it.
+COMPLETE_TABLE_KEY = {
+    "heading": "[xx] Table key",
+    "Share/M": "[xx] share per million definition",
+    "YoY": "[xx] YoY definition",
+    "YoY share": "[xx] YoY share definition",
+    "R²": "[xx] R2 definition",
+}
+
+
+def test_the_columns_add_up_to_the_content_width():
+    """A grid that misses the page edge would shift every value off its rule."""
+    assert sum(width for _, width in report_mod.TABLE_COLUMNS) == (
+        report_mod.CONTENT_W
+    )
+
+
+def test_every_header_fits_the_column_it_prints_in():
+    """Metric names are fixed codes, so they must fit the column they print in.
+
+    The columns are narrow on purpose -- that is the one-page budget -- and
+    nothing can be moved into a translation to shorten them, because metric
+    names are never translated. If a header outgrows its column here, it
+    outgrows it in every report.
+    """
+    for name, width in report_mod.TABLE_COLUMNS:
+        assert report_mod.fit(name, report_mod.FONT_BOLD, 7.8, width - 8) == name, (
+            f"{name!r} does not fit the {width}pt column; shorten the header "
+            "(its wording belongs in the table key, not in the column)"
+        )
+
+
+def test_the_key_explains_the_abbreviated_columns_and_only_those():
+    """Every code that needs decoding has a definition; plain words do not."""
+    items = report_mod.table_key_items()
+    codes = [code for code, _ in items]
+
+    assert codes == ["Share/M", "YoY", "YoY share", "R²"]
+    for _, definition in items:
+        assert len(definition) > 20, "a definition must actually define"
+    # These read as their own definition and cost no one-page space.
+    for plain in ("Lang", "Article", "Views"):
+        assert plain not in codes
+
+
+def test_the_manifest_wording_is_printed_verbatim(golden_analysis, tmp_path):
+    """The key is generated, never translated: what the agent wrote is printed.
+
+    Rewriting it (trimming, re-casing, prefixing) would make study.json an
+    unreliable source -- the whole point of moving it out of the catalogue.
+    """
+    out = tmp_path / "report.html"
+    report_mod.render_html(
+        golden_analysis, None, out, table_key=COMPLETE_TABLE_KEY
+    )
+    html = out.read_text(encoding="utf-8")
+
+    assert "<h3>[xx] Table key</h3>" in html
+    assert "<dt>Share/M</dt><dd>[xx] share per million definition</dd>" in html
+    assert "<dt>YoY</dt><dd>[xx] YoY definition</dd>" in html
+
+
+def test_metric_headers_never_move_with_the_report_language(
+    golden_analysis, tmp_path
+):
+    """A Ukrainian report still reads Share/M and YoY -- codes, not prose."""
+    translator = i18n.Translator("xx", full_translation("xx"))
+    out = tmp_path / "report.html"
+
+    report_mod.render_html(
+        golden_analysis, None, out, translator, table_key=COMPLETE_TABLE_KEY
+    )
+    html = out.read_text(encoding="utf-8")
+
+    for name, _ in report_mod.TABLE_COLUMNS:
+        assert f"<th>{name}</th>" in html, f"{name} must not be translated"
+    assert "<th>[xx]" not in html
+    # Nothing was left to fall back to: the translation covers the prose and
+    # the manifest covers the key.
+    assert translator.untranslated == []
+    assert "Untranslated text" not in html
+
+
+def test_a_localised_report_admits_an_english_key_it_had_to_fall_back_to(
+    golden_analysis, tmp_path
+):
+    """No manifest block: the shipped English wording is used *and* flagged."""
+    translator = i18n.Translator("xx", full_translation("xx"))
+    out = tmp_path / "report.html"
+
+    report_mod.render_html(golden_analysis, None, out, translator)
+    html = out.read_text(encoding="utf-8")
+
+    assert "<dt>YoY</dt><dd>Change in article pageviews" in html
+    assert "Untranslated text" in html
+    assert "table_key" in html
+
+
+def test_html_prints_the_key_directly_under_the_table(golden_analysis, tmp_path):
+    """The decoding belongs with the table it decodes, not with the caveats."""
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert '<section class="table-key">' in html
+    table_end = html.index("</table>")
+    key_start = html.index('class="table-key"')
+    assumptions = html.index("<h2>")
+    assert table_end < key_start < assumptions, "the key must sit under the table"
+    assert "<dt>YoY</dt><dd>Change in article pageviews" in html
+    assert html.count("<dt>") == len(report_mod.table_key_items())
+
+
+def test_the_pdf_draws_the_key_under_the_table(golden_analysis, tmp_path, monkeypatch):
+    """The PDF is checked through the text it lays out, not its byte stream."""
+    drawn: list[str] = []
+    original = report_mod._Sheet.text
+
+    def spy(self, value, *args, **kwargs):
+        drawn.append(value)
+        return original(self, value, *args, **kwargs)
+
+    monkeypatch.setattr(report_mod._Sheet, "text", spy)
+    report_mod.render_pdf(
+        golden_analysis, None, tmp_path / "report.pdf", table_key=COMPLETE_TABLE_KEY
+    )
+
+    key_line = next(i for i, text in enumerate(drawn) if text == "[xx] Table key")
+    limitations = next(i for i, text in enumerate(drawn) if "ASSUMPTIONS" in text)
+    assert key_line < limitations, "the key must be drawn before the caveats"
+
+    entries = drawn[key_line + 1 : limitations]
+    assert any(text.startswith("YoY — ") for text in entries)
+    assert any(text.startswith("Share/M — ") for text in entries)
+
+
+def test_the_key_codes_are_the_headers_the_table_actually_prints():
+    """A key that explained a header the table does not print would be worse
+    than no key: the reader would hunt for a column that is not there."""
+    items = report_mod.table_key_items(COMPLETE_TABLE_KEY)
+    printed = {name for name, _ in report_mod.TABLE_COLUMNS}
+
+    assert [code for code, _ in items] == ["Share/M", "YoY", "YoY share", "R²"]
+    assert set(code for code, _ in items) <= printed
+
+
+def test_an_entry_for_a_column_the_table_never_prints_is_reported(capsys):
+    """Work the report silently drops must be named, not swallowed."""
+    report_mod.warn_unknown_table_key(
+        {"heading": "Key", "Share/M": "ok", "Trend": "not a column"}
+    )
+
+    err = capsys.readouterr().err
+    assert "Trend" in err
+    assert "heading" not in err, "the heading is a valid non-column key"
+
+
+def test_load_table_key_reads_the_block_and_refuses_a_malformed_one(tmp_path):
+    """The block is hand-written, so its shape is checked at the boundary."""
+    path = tmp_path / "study.json"
+    path.write_text(
+        json.dumps({"topic": "x", "table_key": {"heading": "Key", "YoY": "why"}}),
+        encoding="utf-8",
+    )
+    assert report_mod.load_table_key(path) == {"heading": "Key", "YoY": "why"}
+    # A report stage on its own has no manifest to read -- that is not an error.
+    assert report_mod.load_table_key(tmp_path / "absent.json") is None
+
+    path.write_text(
+        json.dumps({"table_key": ["not", "an", "object"]}), encoding="utf-8"
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        report_mod.load_table_key(path)
+    assert "must be an object" in str(excinfo.value)
+
+    path.write_text(json.dumps({"table_key": {"YoY": 5}}), encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        report_mod.load_table_key(path)
+    assert "must be strings" in str(excinfo.value)
 
 
 def test_confidence_pill_uses_the_grade_for_style_and_the_label_for_words():
@@ -376,13 +560,17 @@ def test_report_renders_in_the_requested_language(golden_analysis, tmp_path):
     translator = i18n.Translator("xx", full_translation("xx"))
     out = tmp_path / "report.html"
 
-    report_mod.render_html(golden_analysis, None, out, translator)
+    report_mod.render_html(
+        golden_analysis, None, out, translator, table_key=COMPLETE_TABLE_KEY
+    )
     html = out.read_text(encoding="utf-8")
 
     assert '<html lang="xx">' in html
     assert "<h1>[xx] Audience interest: intermittent fasting</h1>" in html
     assert "<h2>[xx] Assumptions &amp; limitations</h2>" in html
-    assert "<th>[xx] Confidence</th>" in html
+    # Metric names are codes: they are the one thing in the table that the
+    # report language must not touch (the manifest covers their wording).
+    assert "<th>Confidence</th>" in html
     # The English wording is gone from the translated parts...
     assert "<h1>Audience interest:" not in html
     # ...but the data itself is untouched: numbers, titles, codes.
@@ -399,18 +587,17 @@ def test_a_partial_translation_is_flagged_inside_the_report(
     """A report that is half English must say so where the reader is looking."""
     translator = i18n.Translator(
         "pl",
-        {
-            "report.title": "Zainteresowanie odbiorców: {topic}",
-            "report.col_lang": "Język",
-        },
+        {"report.title": "Zainteresowanie odbiorców: {topic}"},
     )
     out = tmp_path / "report.html"
 
-    report_mod.render_html(golden_analysis, None, out, translator)
+    report_mod.render_html(
+        golden_analysis, None, out, translator, table_key=COMPLETE_TABLE_KEY
+    )
     html = out.read_text(encoding="utf-8")
 
     assert "<h1>Zainteresowanie odbiorców: intermittent fasting</h1>" in html
-    assert "<th>Język</th>" in html
+    assert "<th>Lang</th>" in html, "metric names are not part of the catalogue"
     assert '<p class="gap"><strong>Warning</strong> (pl): Untranslated text:' in html
     # The note must name what is missing, not just count it. It lists at most
     # five ids (the reader gets a readable sentence, not a wall), so the

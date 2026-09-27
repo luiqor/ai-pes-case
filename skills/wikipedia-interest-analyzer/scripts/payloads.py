@@ -75,6 +75,10 @@ class StudyManifest(TypedDict):
     overrides: NotRequired[dict[str, str]]
     resolution: NotRequired[Resolution | None]
     report_language: NotRequired[str]
+    #: Agent-written decoding of the table's abbreviated headers (column ->
+    #: definition, plus an optional "heading"). Not part of the translation
+    #: catalogue: it is generated, never translated. See ``report.table_key_items``.
+    table_key: NotRequired[dict[str, str]]
 
 
 # --------------------------------------------------------------------------
@@ -356,6 +360,10 @@ class StudyManifestModel(BaseModel):
     overrides: dict[Annotated[str, Field(pattern=LANG_PATTERN)], str] = {}
     resolution: ResolutionModel | None = None
     report_language: Annotated[str, Field(pattern=LANG_PATTERN)] | None = None
+    # Agent-written, never translated: column header -> definition, plus an
+    # optional "heading". Type-checked only -- the *names* are the report's
+    # column keys, which the report itself owns.
+    table_key: dict[str, str] = {}
 
 
 class PageviewPoint(BaseModel):

@@ -295,8 +295,17 @@ def stage_report(
     analysis: AnalysisPayload,
     out_dir: Path,
     translator: i18n.Translator | None = None,
+    *,
+    table_key: dict[str, str] | None = None,
 ) -> None:
     """Write ``report.html`` always and ``report.pdf`` when it fits one page.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        out_dir: Where both artifacts land.
+        translator: Report language; English when omitted.
+        table_key: The manifest's ``table_key`` block -- the generated (never
+            translated) decoding printed under the comparison table.
 
     Raises:
         SystemExit: Code 1 when the PDF would overflow: the HTML is kept,
@@ -306,12 +315,20 @@ def stage_report(
     html_path = out_dir / "report.html"
     pdf_path = out_dir / "report.pdf"
     report_mod.render_html(
-        analysis, chart_png if chart_png.is_file() else None, html_path, translator
+        analysis,
+        chart_png if chart_png.is_file() else None,
+        html_path,
+        translator,
+        table_key=table_key,
     )
     print(f"  wrote {html_path}")
     try:
         report_mod.render_pdf(
-            analysis, chart_png if chart_png.is_file() else None, pdf_path, translator
+            analysis,
+            chart_png if chart_png.is_file() else None,
+            pdf_path,
+            translator,
+            table_key=table_key,
         )
     except report_mod.ReportOverflow as exc:
         print(f"  error: {exc}", file=sys.stderr)
@@ -332,6 +349,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"languages: {', '.join(study['languages'])}")
     if study.get("report_language"):
         print(f"report:    {study['report_language']}")
+    if study.get("table_key"):
+        print(f"table key: {len(study['table_key'])} entries")
     label, warnings = _window_info(study)
     _print_window(label, warnings)
     if study.get("overrides"):
@@ -427,6 +446,11 @@ def cmd_run(args: argparse.Namespace, *, client: common.JsonFetcher) -> None:
     stages = list(STAGES) if args.stage == "all" else [args.stage]
     study = _load(study_path)
     analysis: AnalysisPayload | None = None
+    # The table key is generated into the manifest, never translated, so it
+    # is read once here and handed straight to the report stage.
+    table_key = study.get("table_key")
+    if "report" in stages:
+        report_mod.warn_unknown_table_key(table_key)
 
     # The report language only matters to the two stages that write
     # human-facing artifacts, and both share one translator so the fallbacks
@@ -457,7 +481,7 @@ def cmd_run(args: argparse.Namespace, *, client: common.JsonFetcher) -> None:
                 stage_chart(analysis, out_dir, translator)
             elif stage == "report":
                 analysis = analysis or common.read_json(out_dir / "analysis.json")
-                stage_report(analysis, out_dir, translator)
+                stage_report(analysis, out_dir, translator, table_key=table_key)
     finally:
         # Even when a stage failed, the caller must learn that the output is
         # (partly) English rather than assume the requested language landed.
