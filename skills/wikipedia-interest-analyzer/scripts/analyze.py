@@ -530,9 +530,9 @@ def build_headline(
 def build_assumptions() -> list[MessageRef]:
     """The two standing assumptions, as refs (fixed order, always present).
 
-    NOTE: the growth definition lives in ``build_limitations`` (with its
-    references/methods.md pointer), not here -- stating it twice made the
-    report print the same bullet twice and cost one-page space.
+    NOTE: the growth definition lives in ``build_limitations``, not here --
+    stating it twice made the report print the same bullet twice and cost
+    one-page space.
     """
     return [
         {"id": "assumption.share"},
