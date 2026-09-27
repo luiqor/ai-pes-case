@@ -78,8 +78,25 @@ Path parameter enums (from the OpenAPI spec):
   redirects are not counted as views of the target page.
 - `spider` = user agents that self-identify as bots; `automated` = traffic flagged by heuristics.
 
+## Endpoint equivalences (verified 2026-09-27)
+
+Measured on production per article over the golden window (2024-10 → 2026-08); these are what the
+skill's optional data layers rest on:
+
+- **Access channels partition `all-access`**: `desktop + mobile-web + mobile-app` equals the
+  `all-access` series exactly (no rounding, no overlap, month by month). So the device split is a
+  partition of what the base study already measured — its percentages are safe to print as-is.
+- **`all-agents` decomposes exactly**: `user + spider + automated` equals `all-agents`, so
+  `all-agents - user` is precisely the non-human share (no residual to explain away).
+- **`top` whole-month body**: `items[0].articles` is a list of `{"rank", "article", "views"}` with a
+  1-based `rank` (1000 entries observed). The path has **no agent segment** — one list per
+  `{project}/{access}`, whatever agent filter the rest of the study uses. A title absent from the
+  list is a result (`rank: null`), not a failure; titles must be matched case-insensitively with
+  `_` mapped to a space.
+
 ## Not verified / open
 
 - Exact rate-limit numbers (deliberately not probed).
-- Whether `all-agents` vs `user` materially changes top-page rankings.
+- Whether `all-agents` vs `user` materially changes top-page rankings (the two series were proven
+  equal in decomposition, but the *ranking order* effect was never measured).
 - Behavior of `429` responses (never triggered).

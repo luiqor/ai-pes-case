@@ -7,6 +7,16 @@ Reads ``study.json`` (written by ``run.py init`` / ``resolve``) and writes
 * ``project_views``  -- total views of the whole wiki, used to normalise for
   the very different sizes of language editions (pl.wikipedia is ~3x cs.wikipedia)
 
+plus, when the manifest lists them under ``layers``, the optional data layers
+(each adds requests only while requested, verified live 2026-09-27):
+
+* ``access`` -- the same article series per channel (desktop, mobile-web,
+  mobile-app; they sum to ``all-access`` exactly);
+* ``bot``    -- the same article series with ``agent=all-agents`` (which
+  equals user + spider + automated exactly), so ``all-agents - user`` is the
+  non-human share;
+* ``top``    -- the article's rank in the project's monthly top list.
+
 Verified behaviours this script encodes:
 
 * zeros are **omitted** from time series, so absent article months become 0;
@@ -39,6 +49,7 @@ from payloads import (
     SeriesPayload,
     StudyManifest,
     StudyWindow,
+    TopRank,
     load_study_manifest,
 )
 from pydantic import ValidationError
@@ -48,6 +59,11 @@ DEFAULT_MONTHS = 24
 # Extra month requested beyond the window and then discarded, so that the
 # window's final month is never the (truncated) last bucket of a range.
 FETCH_OVERSHOOT_MONTHS = 1
+
+# The ``access`` layer's channels. ``all-access`` is not fetched again: it is
+# already the base series, and desktop + mobile-web + mobile-app sum to it
+# exactly (verified live 2026-09-27).
+ACCESS_CHANNELS = ("desktop", "mobile-web", "mobile-app")
 
 
 def stamp_to_month(stamp: str) -> str:
@@ -345,6 +361,133 @@ def _fetch_article_series(
         raise SystemExit(f"error [{exc.kind}]: {exc}") from exc
 
 
+def _aligned(raw: dict[str, int], available: list[str]) -> list[int]:
+    """Project a ``{month: views}`` mapping onto the aligned month list.
+
+    Zeros are omitted by the API, so a missing month means zero views -- the
+    same rule the base series uses.
+    """
+    return [raw.get(month, 0) for month in available]
+
+
+def _fetch_access_layer(
+    project: str,
+    title: str,
+    since: str,
+    fetch_until: str,
+    *,
+    agent: str,
+    available: list[str],
+    client: common.JsonFetcher,
+) -> dict[str, list[int]]:
+    """``access`` layer: one article series per channel, aligned to ``available``.
+
+    A ``no_data`` 404 per channel is normal (a channel can genuinely have
+    zero views while the others do not), so it becomes zeros without a
+    warning -- the base series already reported the all-channels case.
+    """
+    views: dict[str, list[int]] = {}
+    for channel in ACCESS_CHANNELS:
+        raw = _fetch_article_series(
+            project,
+            title,
+            since,
+            fetch_until,
+            access=channel,
+            agent=agent,
+            warnings=[],  # channel-level zeros are not worth a warning
+            client=client,
+        )
+        views[channel] = _aligned(raw, available)
+    return views
+
+
+def _fetch_bot_layer(
+    project: str,
+    title: str,
+    since: str,
+    fetch_until: str,
+    *,
+    access: str,
+    available: list[str],
+    client: common.JsonFetcher,
+) -> list[int]:
+    """``bot`` layer: the same article series with ``agent=all-agents``.
+
+    Verified live (2026-09-27): all-agents = user + spider + automated
+    exactly, so ``all-agents - user`` is the non-human share of views.
+    """
+    raw = _fetch_article_series(
+        project,
+        title,
+        since,
+        fetch_until,
+        access=access,
+        agent="all-agents",
+        warnings=[],  # a zero base series was already warned about
+        client=client,
+    )
+    return _aligned(raw, available)
+
+
+def _fetch_top_layer(
+    project: str,
+    access: str,
+    month: str,
+    title: str,
+    *,
+    warnings: list[str],
+    client: common.JsonFetcher,
+) -> TopRank | None:
+    """``top`` layer: the article's rank in the project's monthly top list.
+
+    The list is one per ``{project}/{access}`` month (no agent segment). A
+    title absent from the list is ``rank: None`` -- "outside the top" is a
+    result, not a failure; a not-yet-loaded month is skipped with a warning.
+
+    Returns:
+        ``{"month", "rank", "list_size"}``, or ``None`` when the month's
+        list is not loaded yet (the metric is then simply absent).
+
+    Raises:
+        SystemExit: On a malformed body -- a shape change must be loud,
+            never a silent "not ranked".
+    """
+    url = common.top_url(project, access, month)
+    try:
+        payload = client.get_json(url)
+    except common.ApiError as exc:
+        if exc.kind == "no_data":
+            warnings.append(
+                f"{project}: top list for {month} not loaded yet -- "
+                "the top-rank metric is skipped for this run"
+            )
+            return None
+        raise SystemExit(f"error [{exc.kind}]: {exc}") from exc
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if (
+        not isinstance(items, list)
+        or not items
+        or not isinstance(items[0], dict)
+        or not isinstance(items[0].get("articles"), list)
+    ):
+        raise SystemExit(
+            f"error [bad_body]: unexpected top response from {url} "
+            "(expected items[0].articles)"
+        )
+    articles: list[Any] = items[0]["articles"]
+    wanted = title.strip().replace("_", " ").casefold()
+    rank: int | None = None
+    for entry in articles:
+        if not isinstance(entry, dict):
+            continue
+        candidate = str(entry.get("article", "")).strip().replace("_", " ")
+        if candidate.casefold() == wanted:
+            rank = int(entry["rank"])
+            break
+    return {"month": month, "rank": rank, "list_size": len(articles)}
+
+
 def fetch_series(
     study: StudyManifest,
     today: date | None = None,
@@ -387,6 +530,15 @@ def fetch_series(
         "agent": study.get("agent", common.DEFAULT_AGENT),
         "granularity": "monthly",
     }
+    # The analysis selection travels with the data, so analyze/report can
+    # read series.json alone (the same reason access/agent are echoed).
+    layers = [str(layer) for layer in (study.get("layers") or [])]
+    criteria = study.get("criteria") or {}
+    rank_by = criteria.get("rank_by") if isinstance(criteria, dict) else None
+    if layers:
+        parameters["layers"] = layers
+    if rank_by:
+        parameters["rank_by"] = str(rank_by)
 
     desired = common.month_range(since, until)
     # Request one month beyond the window and discard it.
@@ -438,7 +590,7 @@ def fetch_series(
                 f"{available[0]}..{available[-1]}"
             )
 
-        series[language] = {
+        entry: LanguageSeries = {
             "language": language,
             "project": project,
             "article_title": title,
@@ -449,6 +601,38 @@ def fetch_series(
             "article_views": [article_raw.get(month, 0) for month in available],
             "project_views": [project_views[month] for month in available],
         }
+        if "access" in layers:
+            entry["access_views"] = _fetch_access_layer(
+                project,
+                title,
+                since,
+                fetch_until,
+                agent=parameters["agent"],
+                available=available,
+                client=client,
+            )
+        if "bot" in layers:
+            entry["all_agents_views"] = _fetch_bot_layer(
+                project,
+                title,
+                since,
+                fetch_until,
+                access=parameters["access"],
+                available=available,
+                client=client,
+            )
+        if "top" in layers:
+            top = _fetch_top_layer(
+                project,
+                parameters["access"],
+                available[-1],
+                title,
+                warnings=warnings,
+                client=client,
+            )
+            if top is not None:
+                entry["top_rank"] = top
+        series[language] = entry
         if all(value == 0 for value in series[language]["article_views"]):
             warnings.append(
                 f"{language}: {title!r} recorded zero views for every month in "
@@ -491,6 +675,9 @@ def main(argv: list[str] | None = None) -> int:
     common.write_json(out, payload)
 
     print(f"wrote {out}")
+    layers = payload["parameters"].get("layers")
+    if layers:
+        print(f"  layers: {', '.join(layers)}")
     for language, item in payload["series"].items():
         print(
             f"  {language}: {item['article_title']} -- "

@@ -178,6 +178,33 @@ MESSAGES: dict[str, str] = {
     "limitation.seasonal_item": (
         "{lang} peaks in calendar month {month} ({ratio}x the overall mean)"
     ),
+    # --- analysis: optional data layers -------------------------------------
+    # One line each on the PDF: these sit in the one-page budget's limitations
+    # block, and a second line here is a page the report no longer has.
+    "limitation.layer_access": (
+        "Device split measured here: desktop + mobile-web + mobile-app sum to "
+        "the all-access total."
+    ),
+    "limitation.layer_bot": (
+        "Bot share = non-user part (spider + automated) of all-agents views -- "
+        "traffic quality, not audience size."
+    ),
+    "limitation.layer_top": (
+        "Top rank is the placement in the project's monthly top list at the "
+        "window's end; >N means not listed."
+    ),
+    # All three measured at once: one line instead of three. Separate bullets
+    # cost ~19pt the strictly-one-page PDF did not have in a real study.
+    "limitation.layers_all": (
+        "Device split, bot share and top rank measured here: the sums behind "
+        "them are exact, >N = outside the top list."
+    ),
+    # --- report: ranking criterion ------------------------------------------
+    "report.ranked_by": "Ranked by {criterion}, best first.",
+    "criterion.share_ppm": "share of edition reading (per million)",
+    "criterion.yoy_share": "share growth",
+    "criterion.mobile_share": "mobile share of views",
+    "criterion.bot_share": "human traffic (lowest bot share)",
     # --- joins and the fallback note ---------------------------------------
     "join.comma": ", ",
     "join.semicolon": "; ",

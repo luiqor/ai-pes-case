@@ -35,7 +35,9 @@ from pathlib import Path
 from typing import Any
 
 from api import (
+    ACCESS_VALUES,
     ACTION_API,
+    AGENT_VALUES,
     DEFAULT_ACCESS,
     DEFAULT_AGENT,
     DEFAULT_GRANULARITY,
@@ -48,6 +50,7 @@ from api import (
     page_exists,
     per_article_url,
     project_for,
+    top_url,
     wikidata_api,
 )
 from errors import ApiError, JsonFetcher
@@ -93,6 +96,9 @@ __all__ = [
     "project_for",
     "per_article_url",
     "aggregate_url",
+    "top_url",
+    "ACCESS_VALUES",
+    "AGENT_VALUES",
     "action_api",
     "wikidata_api",
     "iter_pages",

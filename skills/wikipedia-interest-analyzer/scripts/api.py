@@ -36,6 +36,12 @@ DEFAULT_ACCESS = "all-access"
 DEFAULT_AGENT = "user"
 DEFAULT_GRANULARITY = "monthly"
 
+#: Path-parameter enums for the pageviews API (references/api.md). They live
+#: here, with the URL builders, so a path enum has exactly one definition;
+#: :mod:`payloads` re-exports them for manifest validation.
+ACCESS_VALUES = ("all-access", "desktop", "mobile-app", "mobile-web")
+AGENT_VALUES = ("all-agents", "user", "spider", "automated")
+
 _LANG_RE = re.compile(r"^[a-z][a-z0-9-]{0,17}$")
 
 
@@ -118,6 +124,33 @@ def aggregate_url(
         f"{REST_BASE}pageviews/aggregate/{project}/{access}/{agent}/"
         f"{granularity}/{month_to_stamp(since)}/{month_to_stamp(until)}"
     )
+
+
+def top_url(project: str, access: str, month: str) -> str:
+    """Build the project's monthly top-pages URL (whole month, ``all-days``).
+
+    Verified live (2026-09-27): ``items[0].articles`` is a list of
+    ``{"rank", "article", "views"}`` entries -- see ``references/api.md``.
+    The path carries no agent segment: a top list is one list per
+    ``{project}/{access}``, whatever agent filter the rest of the study uses.
+
+    Args:
+        project: Host such as ``pl.wikipedia.org`` (see ``project_for``).
+        access: One of :data:`ACCESS_VALUES` -- the top list is per channel.
+        month: Complete month, ``YYYY-MM``.
+
+    Returns:
+        A REST v1 ``pageviews/top`` URL for every day of that month.
+
+    Raises:
+        ValueError: On a malformed month or an unknown ``access``.
+    """
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+        raise ValueError(f"month must be YYYY-MM: {month!r}")
+    if access not in ACCESS_VALUES:
+        raise ValueError(f"unknown access {access!r}; expected one of {ACCESS_VALUES}")
+    year, mon = month.split("-")
+    return f"{REST_BASE}pageviews/top/{project}/{access}/{year}/{mon}/all-days"
 
 
 def _api_object(url: str, client: JsonFetcher) -> dict[str, Any]:

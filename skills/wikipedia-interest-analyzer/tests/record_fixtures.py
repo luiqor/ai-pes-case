@@ -32,7 +32,9 @@ import resolve as resolve_mod  # noqa: E402
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 # Fixed study used for recording; keep in sync with the golden assertions in
-# tests/test_analyze.py.
+# tests/test_analyze.py. The optional layers are recorded too, so a future
+# fixture-backed test of `access_split`/`bot_share_pct`/`top_rank` has real
+# bodies to load -- the golden tests themselves never request them.
 STUDY = {
     "version": 1,
     "topic": "intermittent fasting",
@@ -42,6 +44,7 @@ STUDY = {
     "agent": common.DEFAULT_AGENT,
     "granularity": "monthly",
     "overrides": {"pl": "Post"},
+    "layers": ["access", "bot", "top"],
     "resolution": None,
 }
 

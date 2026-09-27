@@ -149,6 +149,49 @@ def _rank_by_growth(
     )
 
 
+def _criterion_value(
+    metric: LanguageMetrics, criterion: str
+) -> float | None:
+    """The number one language scores on for ``criteria.rank_by``.
+
+    Returns ``None`` when the metric was not measured for this language (a
+    coverage gap, or the layer feeding it was never fetched) -- the ranking
+    then omits that language instead of inventing a value for it.
+    """
+    if criterion == "share_ppm":
+        return float(metric["share_ppm"])
+    if criterion == "yoy_share":
+        return metric["yoy"].get("share_pct")
+    if criterion == "mobile_share":
+        split = metric.get("access_split")
+        return split["mobile_pct"] if split else None
+    if criterion == "bot_share":
+        return metric.get("bot_share_pct")
+    return None
+
+
+def _rank_by_criterion(
+    metrics: dict[str, LanguageMetrics], criterion: str
+) -> list[str]:
+    """Order the measured languages best-first for one ranking criterion.
+
+    Every criterion except ``bot_share`` is a "more is better" quantity;
+    ``bot_share`` ranks **ascending** -- a cleaner, more human signal first --
+    which is the only reading that makes it useful for choosing an audience.
+    Ties break on the language code so the order is deterministic.
+    """
+    scored = [
+        (language, value)
+        for language, metric in metrics.items()
+        if (value := _criterion_value(metric, criterion)) is not None
+    ]
+    if criterion == "bot_share":
+        scored.sort(key=lambda kv: (kv[1], kv[0]))
+    else:
+        scored.sort(key=lambda kv: (-kv[1], kv[0]))
+    return [language for language, _ in scored]
+
+
 def split_windows(labels: list[str]) -> WindowSplit:
     """Split into two equal halves for a year-over-year style comparison.
 
@@ -399,7 +442,7 @@ def analyze_language(language: str, item: LanguageSeries) -> LanguageMetrics:
         mean_views=mean_views,
     )
 
-    return {
+    result: LanguageMetrics = {
         "language": language,
         "article_title": item["article_title"],
         "project": item["project"],
@@ -424,6 +467,42 @@ def analyze_language(language: str, item: LanguageSeries) -> LanguageMetrics:
         "confidence": confidence,
         "confidence_reasons": reasons,
     }
+
+    # --- optional data layers (present only when the study requested them) ---
+    access_views = item.get("access_views")
+    if access_views:
+        # Verified live (2026-09-27): the three channels sum to the base
+        # all-access series exactly, so the base total is the denominator.
+        desktop = float(sum(access_views.get("desktop", [])))
+        mobile_web = float(sum(access_views.get("mobile-web", [])))
+        mobile_app = float(sum(access_views.get("mobile-app", [])))
+        total = article_total or (desktop + mobile_web + mobile_app)
+
+        def pct(part: float) -> float:
+            return round(part / total * 100, 2) if total else 0.0
+
+        result["access_split"] = {
+            "total_views": int(article_total),
+            "desktop_pct": pct(desktop),
+            "mobile_web_pct": pct(mobile_web),
+            "mobile_app_pct": pct(mobile_app),
+            "mobile_pct": pct(mobile_web + mobile_app),
+        }
+
+    all_agents = item.get("all_agents_views")
+    if all_agents is not None:
+        # all-agents = user + spider + automated (verified exact), so the
+        # difference is the non-human share. Clamped: a filter disagreement
+        # must never print a negative bot share.
+        bot_total = float(sum(all_agents))
+        if bot_total > 0:
+            non_user = max(bot_total - article_total, 0.0)
+            result["bot_share_pct"] = round(non_user / bot_total * 100, 2)
+
+    if item.get("top_rank"):
+        result["top_rank"] = item["top_rank"]
+
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -626,6 +705,22 @@ def build_limitations(
                 "params": {"items": {"items": seasonal, "sep": "join.semicolon"}},
             }
         )
+    # Layer caveats travel with the metrics they describe: present only when
+    # the data is (a requested layer that produced nothing says nothing).
+    layer_refs: list[MessageRef] = []
+    if any(m.get("access_split") for m in metrics.values()):
+        layer_refs.append({"id": "limitation.layer_access"})
+    if any("bot_share_pct" in m for m in metrics.values()):
+        layer_refs.append({"id": "limitation.layer_bot"})
+    if any(m.get("top_rank") for m in metrics.values()):
+        layer_refs.append({"id": "limitation.layer_top"})
+    if len(layer_refs) == 3:
+        # One line instead of three: these bullets share the strictly-one-page
+        # PDF's last points, and three separate ones pushed a real study over
+        # the edge by 1pt. The wording says exactly what was measured.
+        limitations.append({"id": "limitation.layers_all"})
+    else:
+        limitations.extend(layer_refs)
     return limitations
 
 
@@ -682,6 +777,15 @@ def analyze(payload: SeriesPayload) -> AnalysisPayload:
         "highest_share": ordered[0][0] if ordered else None,
         "fastest_growth": growth_ranked[0][0] if growth_ranked else None,
     }
+    # The user's ranking criterion (study.json "criteria.rank_by"), echoed
+    # through series.json parameters. Absent when no criterion was given, so
+    # a study without one renders exactly as it always did.
+    rank_by = payload["parameters"].get("rank_by")
+    if rank_by:
+        comparison["ranked_by"] = {
+            "criterion": str(rank_by),
+            "order": _rank_by_criterion(metrics, str(rank_by)),
+        }
 
     # One composition, two consumers: the English strings below are the
     # *rendering of* the refs stored beside them, so a report in any other

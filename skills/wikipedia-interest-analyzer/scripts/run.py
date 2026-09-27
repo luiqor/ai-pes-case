@@ -365,6 +365,13 @@ def cmd_status(args: argparse.Namespace) -> None:
         )
     if study.get("table_key"):
         print(f"table key: {len(study['table_key'])} entries")
+    # Optional blocks: printed only when set, so the step-2 review shows
+    # exactly what the study will fetch and how the report will be ordered.
+    if study.get("layers"):
+        print(f"layers:    {', '.join(str(layer) for layer in study['layers'])}")
+    criteria = study.get("criteria") or {}
+    if isinstance(criteria, dict) and criteria.get("rank_by"):
+        print(f"ranking:   {criteria['rank_by']}")
     label, warnings = _window_info(study)
     _print_window(label, warnings)
     if study.get("overrides"):
@@ -465,10 +472,10 @@ def cmd_run(args: argparse.Namespace, *, client: common.JsonFetcher) -> None:
     study = _load(study_path)
     analysis: AnalysisPayload | None = None
     # The table key is generated into the manifest, never translated, so it
-    # is read once here and handed straight to the report stage.
+    # is read once here and handed straight to the report stage. Its warning
+    # about definitions that match no printed column is emitted there, where
+    # the analysis decides which (optional) columns exist.
     table_key = study.get("table_key")
-    if "report" in stages:
-        report_mod.warn_unknown_table_key(table_key)
 
     # The report language only matters to the two stages that write
     # human-facing artifacts, and both share one translator so the fallbacks
@@ -499,6 +506,9 @@ def cmd_run(args: argparse.Namespace, *, client: common.JsonFetcher) -> None:
                 stage_chart(analysis, out_dir, translator)
             elif stage == "report":
                 analysis = analysis or common.read_json(out_dir / "analysis.json")
+                report_mod.warn_unknown_table_key(
+                    table_key, columns=report_mod.table_columns_for(analysis)
+                )
                 stage_report(analysis, out_dir, translator, table_key=table_key)
     finally:
         # Even when a stage failed, the caller must learn that the output is

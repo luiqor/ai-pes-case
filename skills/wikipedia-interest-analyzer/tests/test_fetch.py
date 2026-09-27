@@ -226,3 +226,197 @@ def test_corrupt_pageview_response_stops_the_fetch_with_bad_body(resolve_study):
     with pytest.raises(SystemExit) as excinfo:
         fetch_mod.fetch_series(study, today=GOLDEN_TODAY, client=CorruptPageviews())
     assert "error [bad_body]" in str(excinfo.value)
+
+
+# ---------------------------------------------------------- data layers -----
+def _channel(month_views: int, access: str) -> int:
+    """One recorded month split across the access channels, exactly.
+
+    Desktop takes the half, the two mobile channels split what is left, so
+    ``desktop + mobile-web + mobile-app == month_views`` for every month --
+    the partition property verified live on 2026-09-27.
+    """
+    if access == "desktop":
+        return month_views // 2
+    half_rest = month_views - month_views // 2
+    if access == "mobile-web":
+        return half_rest // 2
+    return half_rest - half_rest // 2
+
+
+class LayerClient:
+    """Synthetic layer bodies served beside the recorded base fixtures.
+
+    The access channels split each recorded month into desktop half / two
+    mobile quarters, so the three channels sum to the base series exactly --
+    the equality verified live on 2026-09-27. ``all-agents`` is exactly
+    twice the recorded user series, so the bot share computes to 50%. The
+    top list always places ``Post`` third and never lists the Czech title.
+    """
+
+    def __init__(self, *, top_body: object | None = None) -> None:
+        self.urls: list[str] = []
+        self.top_body = top_body
+
+    def get_json(self, url: str):
+        self.urls.append(url)
+        if "/pageviews/top/" in url:
+            if self.top_body is not None:
+                return self.top_body
+            return {
+                "items": [
+                    {
+                        "articles": [
+                            {"rank": 1, "article": "Alpha", "views": 900},
+                            {"rank": 2, "article": "Beta", "views": 500},
+                            {"rank": 3, "article": "Post", "views": 400},
+                            {"rank": 4, "article": "Gamma", "views": 300},
+                            {"rank": 5, "article": "Delta", "views": 200},
+                        ]
+                    }
+                ]
+            }
+        if "/per-article/" in url:
+            project, access, agent, title, granularity, start, end = url.split(
+                "/metrics/pageviews/per-article/", 1
+            )[1].split("/")
+            if agent == "all-agents":
+                base = load_fixture(url.replace("/all-agents/", "/user/"))
+                return {
+                    "items": [
+                        {"timestamp": pt["timestamp"], "views": pt["views"] * 2}
+                        for pt in base["items"]
+                    ]
+                }
+            if access in ("desktop", "mobile-web", "mobile-app"):
+                base = load_fixture(url.replace(f"/{access}/", "/all-access/", 1))
+                points = [
+                    {
+                        "timestamp": pt["timestamp"],
+                        "views": _channel(pt["views"], access),
+                    }
+                    for pt in base["items"]
+                ]
+                return {"items": points}
+        return load_fixture(url)
+
+
+def test_layers_add_the_extra_series_and_echo_the_selection(resolve_study):
+    """Each requested layer lands in series.json, and the selection echoes.
+
+    The analysis stage reads ``series.json`` alone, so ``layers`` and
+    ``rank_by`` must travel in ``parameters`` -- the same reason the study's
+    access/agent filters were already echoed there.
+    """
+    study = resolve_study(overrides={"pl": "Post"})
+    study["layers"] = ["access", "bot", "top"]
+    study["criteria"] = {"rank_by": "bot_share"}
+    client = LayerClient()
+
+    payload = fetch_mod.fetch_series(study, today=GOLDEN_TODAY, client=client)
+
+    assert payload["parameters"]["layers"] == ["access", "bot", "top"]
+    assert payload["parameters"]["rank_by"] == "bot_share"
+
+    cs = payload["series"]["cs"]
+    channels = cs["access_views"]
+    assert set(channels) == {"desktop", "mobile-web", "mobile-app"}
+    for values in channels.values():
+        assert len(values) == len(cs["labels"])
+    # The three channels sum to the base series, month by month: the split is
+    # a partition of what the study already measured, not a new measurement.
+    summed = [
+        d + w + a
+        for d, w, a in zip(
+            channels["desktop"],
+            channels["mobile-web"],
+            channels["mobile-app"],
+            strict=True,
+        )
+    ]
+    assert summed == cs["article_views"]
+
+    # all-agents is twice the user series, so half of it is non-user traffic.
+    assert cs["all_agents_views"] == [v * 2 for v in cs["article_views"]]
+
+    # The top list is fetched for the window's final month, per project.
+    assert cs["top_rank"] == {"month": "2026-08", "rank": None, "list_size": 5}
+    assert payload["series"]["pl"]["top_rank"] == {
+        "month": "2026-08",
+        "rank": 3,
+        "list_size": 5,
+    }
+    assert any(
+        "/pageviews/top/pl.wikipedia.org/all-access/2026/08/all-days" in url
+        for url in client.urls
+    )
+    assert not payload["warnings"] or all(
+        "top list" not in w for w in payload["warnings"]
+    )
+
+
+def test_without_layers_no_layer_keys_and_no_extra_requests(resolve_study):
+    """A study that asked for nothing extra fetches nothing extra.
+
+    The two paths must be indistinguishable in cost: no layer URL may be
+    requested, no layer key may appear for a reader to wonder about.
+    """
+    study = resolve_study(overrides={"pl": "Post"})
+    client = LayerClient()
+
+    payload = fetch_mod.fetch_series(study, today=GOLDEN_TODAY, client=client)
+
+    assert "layers" not in payload["parameters"]
+    assert "rank_by" not in payload["parameters"]
+    for entry in payload["series"].values():
+        assert "access_views" not in entry
+        assert "all_agents_views" not in entry
+        assert "top_rank" not in entry
+    assert not any("/pageviews/top/" in url for url in client.urls)
+    assert not any("/all-agents/" in url for url in client.urls)
+    assert not any(
+        f"/per-article/{entry['project']}/{channel}/" in url
+        for entry in payload["series"].values()
+        for channel in ("desktop", "mobile-web", "mobile-app")
+        for url in client.urls
+    )
+
+
+def test_a_top_list_not_loaded_yet_skips_the_metric_with_a_warning(resolve_study):
+    """A month the top endpoint has not loaded is "not ranked this run".
+
+    The base study is complete without it, so the run continues with a
+    warning rather than failing over data that does not exist yet.
+    """
+    study = resolve_study(overrides={"pl": "Post"})
+    study["layers"] = ["top"]
+
+    class NotLoadedYet(LayerClient):
+        def get_json(self, url: str):
+            if "/pageviews/top/" in url:
+                self.urls.append(url)
+                raise common.ApiError(
+                    "no top list for this month", url=url, kind="no_data"
+                )
+            return super().get_json(url)
+
+    payload = fetch_mod.fetch_series(
+        study, today=GOLDEN_TODAY, client=NotLoadedYet()
+    )
+    for entry in payload["series"].values():
+        assert "top_rank" not in entry
+    assert any("not loaded yet" in w for w in payload["warnings"])
+
+
+def test_a_malformed_top_body_stops_the_fetch_loudly(resolve_study):
+    """A shape change in the top endpoint is a loud failure, never a blank."""
+    study = resolve_study(overrides={"pl": "Post"})
+    study["layers"] = ["top"]
+
+    with pytest.raises(SystemExit) as excinfo:
+        fetch_mod.fetch_series(
+            study,
+            today=GOLDEN_TODAY,
+            client=LayerClient(top_body={"items": [{"unexpected": True}]}),
+        )
+    assert "error [bad_body]" in str(excinfo.value)

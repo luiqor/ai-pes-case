@@ -27,6 +27,10 @@ import json
 from pathlib import Path
 from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
 
+# Path enums for the pageviews API (references/api.md): defined next to the
+# URL builders in ``api.py`` and re-exported here, so the manifest and the
+# paths cannot disagree about the same enum.
+from api import ACCESS_VALUES, AGENT_VALUES  # noqa: F401  (re-export)
 from pydantic import BaseModel, Field, ValidationError
 
 
@@ -57,6 +61,16 @@ class Resolution(TypedDict, total=False):
     labels: dict[str, str]
 
 
+class CriteriaSpec(TypedDict, total=False):
+    """``criteria``: how the user wants the audiences ranked in the report.
+
+    Only ``rank_by`` is read today; extra keys a hand-edited manifest carries
+    survive validation untouched (see :func:`validate_study`).
+    """
+
+    rank_by: str
+
+
 class StudyManifest(TypedDict):
     """``study.json`` -- the user-editable manifest.
 
@@ -72,6 +86,11 @@ class StudyManifest(TypedDict):
     access: NotRequired[str]
     agent: NotRequired[str]
     granularity: NotRequired[str]
+    #: Optional data layers fetched on top of the two base series; each adds
+    #: requests only while it is listed (see ``fetch.fetch_series``).
+    layers: NotRequired[list[str]]
+    #: The user's ranking criterion; drives ``comparison.ranked_by``.
+    criteria: NotRequired[CriteriaSpec]
     overrides: NotRequired[dict[str, str]]
     resolution: NotRequired[Resolution | None]
     report_language: NotRequired[str]
@@ -93,11 +112,30 @@ class WindowRange(TypedDict):
 
 
 class RequestParameters(TypedDict):
-    """The pageview query parameters actually used, echoed into every output."""
+    """The pageview query parameters actually used, echoed into every output.
+
+    Also carries the analysis *selection* (``layers``, ``rank_by``) so the
+    later stages can read them from ``series.json`` alone, without the
+    manifest being open.
+    """
 
     access: str
     agent: str
     granularity: str
+    layers: NotRequired[list[str]]
+    rank_by: NotRequired[str]
+
+
+class TopRank(TypedDict):
+    """Where the article placed in the project's monthly top list.
+
+    ``rank`` is ``None`` when the article is not among the listed entries --
+    "outside the top" is a measurement result, not a missing one.
+    """
+
+    month: str
+    rank: int | None
+    list_size: int
 
 
 class LanguageSeries(TypedDict):
@@ -111,6 +149,15 @@ class LanguageSeries(TypedDict):
     labels: list[str]
     article_views: list[int]
     project_views: list[int]
+    #: access layer: monthly article views per access channel, aligned to
+    #: ``labels`` (absent unless the ``access`` layer was requested).
+    access_views: NotRequired[dict[str, list[int]]]
+    #: bot layer: monthly article views with ``agent=all-agents``, aligned to
+    #: ``labels`` (absent unless the ``bot`` layer was requested).
+    all_agents_views: NotRequired[list[int]]
+    #: top layer: rank in the project's top list for the window's last month
+    #: (absent unless the ``top`` layer was requested).
+    top_rank: NotRequired[TopRank]
 
 
 class SeriesPayload(TypedDict):
@@ -209,6 +256,20 @@ class SeriesView(TypedDict):
     share_ppm: list[float]
 
 
+class AccessSplit(TypedDict):
+    """Share of the window's article views per access channel, in percent.
+
+    Present only when the ``access`` layer was fetched; the four percentages
+    sum to 100 (``mobile_pct`` = mobile-web + mobile-app).
+    """
+
+    total_views: int
+    desktop_pct: float
+    mobile_web_pct: float
+    mobile_app_pct: float
+    mobile_pct: float
+
+
 class LanguageMetrics(TypedDict):
     """Everything the report says about one language edition."""
 
@@ -229,6 +290,12 @@ class LanguageMetrics(TypedDict):
     confidence: str
     confidence_reasons: list[str]
     series: NotRequired[SeriesView]
+    #: access layer -- absent unless that layer was fetched.
+    access_split: NotRequired[AccessSplit]
+    #: bot layer: share of ``all-agents`` views that were *not* ``user``.
+    bot_share_pct: NotRequired[float]
+    #: top layer: placement in the project's monthly top list.
+    top_rank: NotRequired[TopRank]
 
 
 class ShareRanking(TypedDict):
@@ -246,6 +313,18 @@ class GrowthRanking(TypedDict):
     article_pct: float | None
 
 
+class RankedBy(TypedDict):
+    """The user's ranking criterion, resolved into an explicit order.
+
+    ``order`` lists every *measured* language best-first; languages whose
+    metric could not be computed (a coverage gap, a layer that was not
+    fetched) are simply absent rather than ranked last.
+    """
+
+    criterion: str
+    order: list[str]
+
+
 class Comparison(TypedDict):
     """Cross-language rankings; see SKILL.md "Answering the user's question"."""
 
@@ -253,6 +332,8 @@ class Comparison(TypedDict):
     by_growth_share_pct: list[GrowthRanking]
     highest_share: str | None
     fastest_growth: str | None
+    #: Present only when the manifest carries ``criteria.rank_by``.
+    ranked_by: NotRequired[RankedBy]
 
 
 class MessageRef(TypedDict, total=False):
@@ -314,9 +395,16 @@ class AnalysisPayload(TypedDict):
 LANG_PATTERN = r"^[a-z][a-z0-9-]{0,17}$"
 MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
 
-# Path enums for the pageviews API, from references/api.md (verified).
-ACCESS_VALUES = ("all-access", "desktop", "mobile-app", "mobile-web")
-AGENT_VALUES = ("all-agents", "user", "spider", "automated")
+# Optional data layers (study.json "layers"); each maps to extra requests in
+# fetch.py and extra metrics in analyze.py. Verified live 2026-09-27:
+# desktop + mobile-web + mobile-app == all-access, and
+# user + spider + automated == all-agents, exactly.
+LAYER_VALUES = ("access", "bot", "top")
+
+# Ranking criteria (study.json "criteria.rank_by"); the two layer-bound ones
+# require their layer, which validate_study checks below.
+RANK_BY_VALUES = ("share_ppm", "yoy_share", "mobile_share", "bot_share")
+RANK_BY_REQUIRES_LAYER = {"mobile_share": "access", "bot_share": "bot"}
 
 
 class StudyWindowModel(BaseModel):
@@ -347,6 +435,14 @@ class ResolutionModel(BaseModel):
     labels: dict[str, str] = {}
 
 
+class CriteriaModel(BaseModel):
+    """``criteria``: only ``rank_by`` is interpreted; unknown keys ignored."""
+
+    rank_by: Literal["share_ppm", "yoy_share", "mobile_share", "bot_share"] | None = (
+        None
+    )
+
+
 class StudyManifestModel(BaseModel):
     """Runtime shape of ``study.json``; fields mirror :class:`StudyManifest`."""
 
@@ -357,6 +453,8 @@ class StudyManifestModel(BaseModel):
     access: Literal["all-access", "desktop", "mobile-app", "mobile-web"] = "all-access"
     agent: Literal["all-agents", "user", "spider", "automated"] = "user"
     granularity: Literal["monthly"] = "monthly"
+    layers: list[Literal["access", "bot", "top"]] = []
+    criteria: CriteriaModel = Field(default_factory=CriteriaModel)
     overrides: dict[Annotated[str, Field(pattern=LANG_PATTERN)], str] = {}
     resolution: ResolutionModel | None = None
     report_language: Annotated[str, Field(pattern=LANG_PATTERN)] | None = None
@@ -404,6 +502,20 @@ def validate_study(raw: object, source: str | Path) -> StudyManifest:
             for err in exc.errors()
         )
         raise SystemExit(f"error: invalid study manifest {source}: {detail}") from exc
+    # Cross-field check the shape alone cannot express: a layer-bound ranking
+    # criterion is meaningless without its data layer, and a report that
+    # silently fell back to another ranking would be worse than a refusal.
+    if isinstance(raw, dict):
+        criteria = raw.get("criteria")
+        rank_by = criteria.get("rank_by") if isinstance(criteria, dict) else None
+        layers = raw.get("layers") or []
+        needed = RANK_BY_REQUIRES_LAYER.get(str(rank_by))
+        if needed and needed not in layers:
+            raise SystemExit(
+                f"error: invalid study manifest {source}: criteria.rank_by "
+                f"'{rank_by}' requires the '{needed}' data layer -- add "
+                f"'\"{needed}\"' to the 'layers' list"
+            )
     return cast(StudyManifest, raw)
 
 

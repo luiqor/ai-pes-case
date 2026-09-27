@@ -124,3 +124,77 @@ def test_validate_study_accepts_a_resolved_manifest(resolve_study):
     """The shape resolve.py writes must satisfy the boundary it is saved to."""
     study: dict[str, Any] = resolve_study()
     assert payloads.validate_study(study, "test") is study
+
+
+# ---------------------------------------------------------- data layers -----
+def test_layers_and_criteria_pass_through_unchanged(study_factory):
+    """The user's own words in ``criteria`` survive like any other note.
+
+    Only ``rank_by`` is interpreted; the rest of the block (and the layer
+    selection) is carried through untouched, exactly like hand-written keys.
+    """
+    study = study_factory()
+    study["layers"] = ["access", "bot", "top"]
+    study["criteria"] = {"rank_by": "bot_share", "note": "own words"}
+
+    assert payloads.validate_study(study, "study.json") is study
+    assert study["criteria"]["note"] == "own words"
+
+
+def test_an_unknown_layer_lists_the_valid_ones(study_factory):
+    """A layer name becomes a URL path segment -- reject it here, not as 404."""
+    study = study_factory()
+    study["layers"] = ["mobile"]
+
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    message = str(excinfo.value)
+    assert "layers.0" in message
+    assert "access" in message
+
+
+def test_an_unknown_rank_criterion_lists_the_valid_ones(study_factory):
+    study = study_factory()
+    study["criteria"] = {"rank_by": "popularity"}
+
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    message = str(excinfo.value)
+    assert "criteria.rank_by" in message
+    assert "share_ppm" in message
+
+
+def test_a_layer_bound_criterion_demands_its_layer(study_factory):
+    """Ranking by a metric the study never fetches must refuse, not fall back.
+
+    A report silently sorted by a *different* criterion than the one asked
+    for would look correct and be wrong.
+    """
+    study = study_factory()
+    study["criteria"] = {"rank_by": "bot_share"}
+
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    message = str(excinfo.value)
+    assert "criteria.rank_by" in message
+    assert "'bot'" in message
+    assert "layers" in message
+
+    study["layers"] = ["bot"]
+    assert payloads.validate_study(study, "study.json") is study
+
+
+def test_mobile_share_is_tied_to_the_access_layer(study_factory):
+    study = study_factory()
+    study["criteria"] = {"rank_by": "mobile_share"}
+
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    assert "'access'" in str(excinfo.value)
+
+
+def test_a_layer_free_criterion_needs_no_layer(study_factory):
+    """The default criteria keep working for a study that fetches no layers."""
+    study = study_factory()
+    study["criteria"] = {"rank_by": "share_ppm"}
+    assert payloads.validate_study(study, "study.json") is study

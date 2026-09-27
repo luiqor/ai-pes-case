@@ -7,6 +7,8 @@ regressed.
 
 from __future__ import annotations
 
+from typing import Any
+
 import analyze as analyze_mod
 import common
 import pytest
@@ -305,3 +307,220 @@ def test_headline_reports_nothing_when_data_is_insufficient(make_series):
     )
     analysis = analyze_mod.analyze(payload)
     assert "No language edition has enough data" in analysis["headline"]
+
+
+# ---------------------------------------------------------- data layers -----
+def _layered(
+    make_series,
+    *,
+    labels: list[str],
+    article: list[int],
+    project: list[int],
+    language: str = "pl",
+    title: str = "Post",
+    access_views: dict[str, list[int]] | None = None,
+    all_agents: list[int] | None = None,
+    top_rank: dict | None = None,
+    rank_by: str | None = None,
+    second: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A series payload carrying optional layer data (and a second language)."""
+    payload = make_series(
+        labels=labels,
+        article=article,
+        project=project,
+        language=language,
+        title=title,
+    )
+    entry = payload["series"][language]
+    if access_views is not None:
+        entry["access_views"] = access_views
+    if all_agents is not None:
+        entry["all_agents_views"] = all_agents
+    if top_rank is not None:
+        entry["top_rank"] = top_rank
+    if second is not None:
+        payload["series"][second["language"]] = second
+    layers = [
+        name
+        for name, present in (
+            ("access", access_views is not None),
+            ("bot", all_agents is not None),
+            ("top", top_rank is not None),
+        )
+        if present
+    ]
+    payload["parameters"]["layers"] = layers
+    if rank_by:
+        payload["parameters"]["rank_by"] = rank_by
+    return payload
+
+
+def test_layer_metrics_are_derived_from_the_extra_series(make_series):
+    """The layers answer questions the base series cannot, in one vocabulary.
+
+    The device split partitions the base total; the bot share is
+    ``all-agents - user`` over ``all-agents``; the top rank is carried
+    through unchanged (its meaning belongs to the endpoint, not to us).
+    """
+    labels = common.month_range("2024-10", "2026-08")
+    payload = _layered(
+        make_series,
+        labels=labels,
+        article=[60] * len(labels),
+        project=[1_000_000] * len(labels),
+        access_views={
+            "desktop": [10] * len(labels),
+            "mobile-web": [30] * len(labels),
+            "mobile-app": [20] * len(labels),
+        },
+        all_agents=[90] * len(labels),
+        top_rank={"month": "2026-08", "rank": 42, "list_size": 1000},
+    )
+
+    metric = analyze_mod.analyze(payload)["metrics"]["pl"]
+
+    split = metric["access_split"]
+    assert split["total_views"] == 60 * len(labels)
+    assert split["desktop_pct"] == 16.67
+    assert split["mobile_pct"] == 83.33
+    # 90 * 23 all-agents, of which 60 * 23 is the user series.
+    assert metric["bot_share_pct"] == 33.33
+    assert metric["top_rank"] == {"month": "2026-08", "rank": 42, "list_size": 1000}
+
+
+def test_without_layers_no_layer_metric_appears(golden_analysis):
+    """The base analysis stays exactly as it was: no phantom columns."""
+    metric = golden_analysis["metrics"]["cs"]
+    assert "access_split" not in metric
+    assert "bot_share_pct" not in metric
+    assert "top_rank" not in metric
+    assert "layers" not in golden_analysis["parameters"]
+    assert "ranked_by" not in golden_analysis["comparison"]
+
+
+def test_ranked_by_orders_best_first_and_ascending_for_bots(make_series):
+    """``bot_share`` is the one criterion where the *lowest* number wins.
+
+    A report that ranked pollution first would lead its reader to the
+    noisiest audience, which is the opposite of what the question asked.
+    """
+    labels = common.month_range("2024-10", "2026-08")
+    payload = _layered(
+        make_series,
+        labels=labels,
+        article=[100] * len(labels),
+        project=[1_000_000] * len(labels),
+        all_agents=[100] * len(labels),  # pl: 0% bot traffic
+        rank_by="bot_share",
+        second={
+            "language": "cs",
+            "project": "cs.wikipedia.org",
+            "article_title": "Přerušovaný půst",
+            "resolved_via": "sitelink",
+            "native_gap": False,
+            "labels": labels,
+            "article_views": [100] * len(labels),
+            "project_views": [1_000_000] * len(labels),
+            "all_agents_views": [200] * len(labels),  # cs: 50% bot traffic
+        },
+    )
+
+    ranked = analyze_mod.analyze(payload)["comparison"]["ranked_by"]
+
+    assert ranked["criterion"] == "bot_share"
+    assert ranked["order"] == ["pl", "cs"]
+
+
+def test_ranked_by_for_share_is_descending(make_series):
+    """The default criteria keep their meaning: more reading, higher rank."""
+    labels = common.month_range("2024-10", "2026-08")
+    payload = _layered(
+        make_series,
+        labels=labels,
+        article=[100] * len(labels),
+        project=[10_000_000] * len(labels),
+        rank_by="share_ppm",
+        second={
+            "language": "cs",
+            "project": "cs.wikipedia.org",
+            "article_title": "Půst",
+            "resolved_via": "sitelink",
+            "native_gap": False,
+            "labels": labels,
+            "article_views": [100] * len(labels),
+            "project_views": [1_000_000] * len(labels),
+        },
+    )
+
+    ranked = analyze_mod.analyze(payload)["comparison"]["ranked_by"]
+    # pl: 10 ppm, cs: 100 ppm -- the richer edition leads.
+    assert ranked["order"] == ["cs", "pl"]
+
+
+def test_a_criterion_without_data_ranks_no_one(make_series):
+    """A ranking over unmeasured metrics is empty, never invented.
+
+    Validation refuses this combination at the manifest, so reaching it
+    means the data was lost *after* validation; an empty order says so
+    instead of silently falling back to some other ranking.
+    """
+    labels = common.month_range("2024-10", "2026-08")
+    payload = _layered(
+        make_series,
+        labels=labels,
+        article=[100] * len(labels),
+        project=[1_000_000] * len(labels),
+        rank_by="mobile_share",  # declared, but no access layer was fetched
+    )
+
+    analysis = analyze_mod.analyze(payload)
+
+    assert analysis["comparison"]["ranked_by"]["order"] == []
+
+
+def test_layer_limitations_are_added_only_for_measured_layers(
+    golden_analysis, make_series
+):
+    """Every limitation the report shows must describe a metric it shows."""
+    golden = " ".join(golden_analysis["limitations"])
+    assert "Device split" not in golden
+    assert "Bot share" not in golden
+    assert "Top rank" not in golden
+
+    labels = common.month_range("2024-10", "2026-08")
+    all_layers = _layered(
+        make_series,
+        labels=labels,
+        article=[60] * len(labels),
+        project=[1_000_000] * len(labels),
+        access_views={
+            "desktop": [10] * len(labels),
+            "mobile-web": [30] * len(labels),
+            "mobile-app": [20] * len(labels),
+        },
+        all_agents=[90] * len(labels),
+        top_rank={"month": "2026-08", "rank": None, "list_size": 1000},
+    )
+    everything = " ".join(analyze_mod.analyze(all_layers)["limitations"])
+    # All three measured at once cost ONE line: three bullets pushed a real
+    # one-page PDF over the edge (see tests/test_report.py).
+    assert everything.count("measured here") == 1
+    assert "Device split" in everything and "top rank" in everything
+
+    # A partial set keeps its own wording -- and never claims what was not run.
+    access_only = _layered(
+        make_series,
+        labels=labels,
+        article=[60] * len(labels),
+        project=[1_000_000] * len(labels),
+        access_views={
+            "desktop": [10] * len(labels),
+            "mobile-web": [30] * len(labels),
+            "mobile-app": [20] * len(labels),
+        },
+    )
+    partial = " ".join(analyze_mod.analyze(access_only)["limitations"])
+    assert "Device split measured here" in partial
+    assert "Bot share" not in partial
+    assert "Top rank" not in partial

@@ -712,3 +712,76 @@ def test_a_corrupt_translations_file_stops_the_run(tmp_path, capsys):
         == 1
     )
     assert "cannot read translations" in capsys.readouterr().err
+
+
+def test_status_surfaces_the_layers_and_the_ranking_criterion(tmp_path, capsys):
+    """The step-2 review must show what the study will fetch and how it sorts."""
+    path = _init(tmp_path)
+    study = common.read_json(path)
+    study["layers"] = ["access", "bot"]
+    study["criteria"] = {"rank_by": "bot_share"}
+    common.write_json(path, study)
+
+    assert run_mod.main(["status", "--study", path]) == 0
+    out = capsys.readouterr().out
+
+    assert "layers:    access, bot" in out
+    assert "ranking:   bot_share" in out
+
+
+def test_status_says_nothing_about_a_study_that_asked_for_no_extras(
+    tmp_path, capsys
+):
+    """Absent optional blocks stay absent: no line to misread as a default."""
+    path = _init(tmp_path)
+
+    assert run_mod.main(["status", "--study", path]) == 0
+    out = capsys.readouterr().out
+
+    assert "layers:" not in out
+    assert "ranking:" not in out
+
+
+def test_report_stage_renders_the_layer_columns_and_the_ranking(tmp_path):
+    """End to end through ``run.py``: analysis.json decides the columns.
+
+    The report stage reads no flags for this -- which columns exist follows
+    from the metrics that were measured, so a rerun of the stage alone (the
+    common "I changed my mind about the wording" loop) stays correct.
+    """
+    path = _init(tmp_path)
+    out = tmp_path / "out"
+    assert run_mod.main(["all", "--study", path, "--out", str(out)]) == 0
+
+    analysis = common.read_json(out / "analysis.json")
+    for metric in analysis["metrics"].values():
+        metric["access_split"] = {
+            "total_views": metric["article_total"],
+            "desktop_pct": 40.0,
+            "mobile_web_pct": 30.0,
+            "mobile_app_pct": 30.0,
+            "mobile_pct": 60.0,
+        }
+        metric["bot_share_pct"] = 12.5
+        metric["top_rank"] = {"month": "2026-08", "rank": 9, "list_size": 1000}
+    analysis["comparison"]["ranked_by"] = {
+        "criterion": "bot_share",
+        "order": ["cs", "pl"],
+    }
+    common.write_json(out / "analysis.json", analysis)
+
+    assert (
+        run_mod.main(
+            ["all", "--study", path, "--out", str(out), "--stage", "report"]
+        )
+        == 0
+    )
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert "<th>Mobile %</th>" in html
+    assert "<th>Bot %</th>" in html
+    assert "<td>60.0%</td>" in html
+    assert "<td>12.5%</td>" in html
+    assert "<td>9</td>" in html
+    assert "Ranked by human traffic (lowest bot share), best first." in html
+    assert (out / "report.pdf").is_file()

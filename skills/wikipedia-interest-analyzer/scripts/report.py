@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import base64
 import html
+import math
 import string
 import sys
 from collections.abc import Mapping
@@ -76,13 +77,18 @@ GRADE_PILLS: dict[str, tuple[Color, Color]] = {
 
 MAX_CHART_HEIGHT = 250.0
 
-#: Printed column headers and their widths in points; the widths add up to
-#: ``CONTENT_W`` exactly, so the grid fills the page edge to edge.
+#: The **base** printed column headers and their widths in points; the widths
+#: add up to ``CONTENT_W`` exactly, so the grid fills the page edge to edge.
 #:
 #: The labels are **not translatable** -- a metric name is a code, and a
 #: column this narrow cannot hold a translated phrase anyway. The decoding a
 #: reader needs is printed under the table from the manifest's ``table_key``
 #: block (:func:`table_key_items`), never from the translation catalogue.
+#:
+#: Columns for the optional data layers are *appended* by
+#: :func:`table_columns_for` when the analysis carries those metrics, and the
+#: widths are re-fitted to ``CONTENT_W`` -- a study without layers renders
+#: exactly this grid, byte for byte.
 TABLE_COLUMNS = [
     ("Lang", 34),
     ("Article", 118),
@@ -95,11 +101,25 @@ TABLE_COLUMNS = [
 ]
 ALIGN_LEFT = {"Lang", "Article"}
 
+#: Optional columns, keyed by the metric that must be present in at least
+#: one language for the column to appear (name -> relative width weight).
+#: The weights are normalised to ``CONTENT_W`` together with the base grid;
+#: with no optional column active they are never used, so the base widths
+#: above stay exact.
+OPTIONAL_TABLE_COLUMNS: dict[str, int] = {
+    "Mobile %": 54,
+    "Bot %": 42,
+    "Rank": 38,
+}
+
 #: Columns whose header is an abbreviation: these must be defined under the
 #: table, so each ships with an English fallback (:data:`TABLE_KEY_DEFAULTS`).
 #: The plain columns ("Lang", "Article", "Views", "Confidence") read as their
 #: own definition and need no entry -- an agent may still supply one.
-TABLE_KEY_COLUMNS = ("Share/M", "YoY", "YoY share", "R\u00b2")
+#: Only columns that are actually printed are ever listed (see
+#: :func:`table_key_items`), so the optional codes cost nothing in a study
+#: that never fetched their layer.
+TABLE_KEY_COLUMNS = ("Share/M", "YoY", "YoY share", "R\u00b2", *OPTIONAL_TABLE_COLUMNS)
 
 #: Heading of the key when the manifest does not carry its own.
 TABLE_KEY_HEADING = "Table key"
@@ -123,6 +143,18 @@ TABLE_KEY_DEFAULTS: dict[str, str] = {
     "R\u00b2": (
         "How much of the month-to-month variation a straight line explains "
         "(0 to 1)."
+    ),
+    "Mobile %": (
+        "Share of this article's window views read on mobile (mobile-web + "
+        "mobile-app), in percent."
+    ),
+    "Bot %": (
+        "Non-user share (spider + automated) of all-agents views; lower means "
+        "a cleaner human signal."
+    ),
+    "Rank": (
+        "Placement in the project's monthly top list at the window's end; "
+        ">N means outside the listed top N."
     ),
 }
 
@@ -293,8 +325,118 @@ def footer_for(
     )
 
 
+def _fit_widths(columns: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """Scale column weights so the grid still fills ``CONTENT_W`` exactly.
+
+    The base grid already sums to ``CONTENT_W`` and is returned untouched;
+    when optional columns join, every column gives up points in proportion to
+    how much room it has above its own header (no column is ever pushed below
+    the width its header needs), and the rounding remainder is settled on the
+    widest column so the sum is exact rather than merely close.
+
+    Args:
+        columns: ``(header, weight)`` pairs; total need not be ``CONTENT_W``.
+
+    Returns:
+        The same headers with weights summing to exactly ``CONTENT_W``.
+
+    Raises:
+        SystemExit: If the deficit exceeds all available slack -- impossible
+            with the shipped columns, but a loud failure beats a PDF whose
+            headers collide silently.
+    """
+    total = sum(width for _, width in columns)
+    target = int(CONTENT_W)
+    if total == target:
+        return columns
+    minima = [
+        (name, math.ceil(pdfmetrics.stringWidth(name, FONT_BOLD, 7.8)) + 9)
+        for name, _ in columns
+    ]
+    slack = [
+        width - minimum
+        for (_, width), (_, minimum) in zip(columns, minima, strict=True)
+    ]
+    deficit = total - target
+    if deficit > 0:
+        pool = sum(slack)
+        if pool < deficit:
+            raise SystemExit(
+                "error: the table columns do not fit the page width "
+                f"({total}pt of weight, only {pool}pt of slack above the "
+                f"headers for a {deficit}pt deficit)"
+            )
+        scaled = [
+            (name, width - deficit * (room / pool))
+            for (name, width), room in zip(columns, slack, strict=True)
+        ]
+    else:
+        gain = -deficit
+        scaled = [
+            (name, width + gain * (width / total))
+            for name, width in columns
+        ]
+    rounded = [(name, round(width)) for name, width in scaled]
+    delta = target - sum(width for _, width in rounded)
+    if delta:
+        widest = max(range(len(rounded)), key=lambda i: rounded[i][1])
+        name, width = rounded[widest]
+        rounded[widest] = (name, width + delta)
+    return rounded
+
+
+def table_columns_for(analysis: AnalysisPayload) -> list[tuple[str, int]]:
+    """The printed columns for this analysis: the base grid, plus layer columns.
+
+    A layer column appears only when at least one language actually carries
+    its metric -- a report never shows an empty column, and a study without
+    ``--layers`` renders exactly the base grid the catalogue tests pin down.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+
+    Returns:
+        ``(header, width)`` pairs summing to ``CONTENT_W``, in print order.
+    """
+    columns = list(TABLE_COLUMNS)
+    metrics = analysis.get("metrics") or {}
+    if any(metric.get("access_split") for metric in metrics.values()):
+        columns.append(("Mobile %", OPTIONAL_TABLE_COLUMNS["Mobile %"]))
+    if any("bot_share_pct" in metric for metric in metrics.values()):
+        columns.append(("Bot %", OPTIONAL_TABLE_COLUMNS["Bot %"]))
+    if any(metric.get("top_rank") for metric in metrics.values()):
+        columns.append(("Rank", OPTIONAL_TABLE_COLUMNS["Rank"]))
+    return _fit_widths(columns)
+
+
+def _measured_order(analysis: AnalysisPayload) -> list[str]:
+    """Language order for the table: the study's ranking first, then the rest.
+
+    When the study picked a ``rank_by`` criterion the comparison already
+    sorted the languages; the table follows it so the report's centrepiece
+    and its ranking note agree. Languages the ranking skipped keep their
+    original order after the ranked ones.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+
+    Returns:
+        Measured language codes in display order.
+    """
+    metrics = analysis["metrics"]
+    ranked = (analysis.get("comparison") or {}).get("ranked_by")
+    if not ranked:
+        return list(metrics)
+    listed = [code for code in ranked["order"] if code in metrics]
+    seen = set(listed)
+    return listed + [code for code in metrics if code not in seen]
+
+
 def table_rows_for(
-    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+    analysis: AnalysisPayload,
+    translator: i18n.Translator | None = None,
+    *,
+    columns: list[tuple[str, int]] | None = None,
 ) -> list[dict[str, str]]:
     """Build the comparison table: one row per measured language, then gaps.
 
@@ -307,45 +449,100 @@ def table_rows_for(
         translator: Target language; the confidence *labels* are translated,
             the grade itself (``high``/``medium``/``low``) stays the value
             stored in ``analysis.json``.
+        columns: Active columns from :func:`table_columns_for`; defaults to
+            the base grid so a caller that does not care about layers keeps
+            the historical rows. The optional layer cells are only built when
+            their column is active.
 
     Returns:
-        Row dicts keyed by column name, plus the ``"gap"`` marker and the
-        ``"grade"`` (confidence pill class) presentation hint.
+        Row dicts keyed by every base column (plus any active optional one),
+        plus the ``"gap"`` marker and the ``"grade"`` (confidence pill class)
+        presentation hint. A layer metric this language never produced is
+        rendered as an em dash -- never as a blank, never as zero.
     """
     tr = translator or i18n.english()
+    names = {name for name, _ in columns} if columns is not None else None
+
+    def wants(name: str) -> bool:
+        return names is None or name in names
+
     rows: list[dict[str, str]] = []
-    for language, metric in analysis["metrics"].items():
+    for language in _measured_order(analysis):
+        metric = analysis["metrics"][language]
         yoy = metric["yoy"]
-        rows.append(
-            {
-                "gap": "",
-                "grade": metric["confidence"],
-                "Lang": language,
-                "Article": metric["article_title"],
-                "Views": f"{metric['article_total']:,}",
-                "Share/M": f"{metric['share_ppm']:.2f}",
-                "YoY": fmt_pct(yoy.get("article_pct"), tr),
-                "YoY share": fmt_pct(yoy.get("share_pct"), tr),
-                "R\u00b2": f"{metric['trend']['share']['r2']:.2f}",
-                "Confidence": tr.t(f"confidence.{metric['confidence']}").upper(),
-            }
-        )
+        row: dict[str, str] = {
+            "gap": "",
+            "grade": metric["confidence"],
+            "Lang": language,
+            "Article": metric["article_title"],
+            "Views": f"{metric['article_total']:,}",
+            "Share/M": f"{metric['share_ppm']:.2f}",
+            "YoY": fmt_pct(yoy.get("article_pct"), tr),
+            "YoY share": fmt_pct(yoy.get("share_pct"), tr),
+            "R\u00b2": f"{metric['trend']['share']['r2']:.2f}",
+            "Confidence": tr.t(f"confidence.{metric['confidence']}").upper(),
+        }
+        if wants("Mobile %"):
+            split = metric.get("access_split")
+            row["Mobile %"] = (
+                f"{split['mobile_pct']:.1f}%" if split else "\u2014"
+            )
+        if wants("Bot %"):
+            bot = metric.get("bot_share_pct")
+            row["Bot %"] = f"{bot:.1f}%" if bot is not None else "\u2014"
+        if wants("Rank"):
+            top = metric.get("top_rank")
+            if top is None:
+                row["Rank"] = "\u2014"
+            elif top["rank"] is None:
+                row["Rank"] = f">{top['list_size']}"
+            else:
+                row["Rank"] = str(top["rank"])
+        rows.append(row)
     for language in analysis.get("gaps", []):
-        rows.append(
-            {
-                "gap": "gap",
-                "grade": "gap",
-                "Lang": language,
-                "Article": tr.t("report.gap_article"),
-                "Views": "\u2014",
-                "Share/M": "\u2014",
-                "YoY": "\u2014",
-                "YoY share": "\u2014",
-                "R\u00b2": "\u2014",
-                "Confidence": tr.t("report.gap_confidence"),
-            }
-        )
+        row = {
+            "gap": "gap",
+            "grade": "gap",
+            "Lang": language,
+            "Article": tr.t("report.gap_article"),
+            "Views": "\u2014",
+            "Share/M": "\u2014",
+            "YoY": "\u2014",
+            "YoY share": "\u2014",
+            "R\u00b2": "\u2014",
+            "Confidence": tr.t("report.gap_confidence"),
+        }
+        for name in ("Mobile %", "Bot %", "Rank"):
+            if wants(name):
+                row[name] = "\u2014"
+        rows.append(row)
     return rows
+
+
+def ranked_by_text(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> str:
+    """One plain-text line saying the table is sorted by the chosen criterion.
+
+    Without this line a reordered table is a puzzle: the reader has no way to
+    see *why* one language leads. A study with no ``rank_by`` gets an empty
+    string -- the default order needs no excuse. Plain text so both the HTML
+    and the PDF can print the same sentence.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        translator: Target language; English when omitted.
+
+    Returns:
+        ``""`` or a sentence naming the criterion, e.g.
+        ``Ranked by share of edition reading (per million), best first.``
+    """
+    ranked = (analysis.get("comparison") or {}).get("ranked_by")
+    if not ranked:
+        return ""
+    tr = translator or i18n.english()
+    label = tr.t(f"criterion.{ranked['criterion']}")
+    return tr.t("report.ranked_by", criterion=label)
 
 
 def gaps_note(
@@ -366,6 +563,8 @@ def gaps_note(
 def table_key_items(
     table_key: Mapping[str, str] | None = None,
     translator: i18n.Translator | None = None,
+    *,
+    columns: list[tuple[str, int]] | None = None,
 ) -> list[tuple[str, str]]:
     """The ``(header, definition)`` pairs printed as the key under the table.
 
@@ -377,6 +576,10 @@ def table_key_items(
     that had to use the English fallback admits it instead of looking
     finished.
 
+    Only columns that are actually printed are explained: an optional layer
+    column that never appeared would push redundant wording into a
+    one-page budget.
+
     Columns outside :data:`TABLE_KEY_COLUMNS` are printed only when the
     manifest supplies them -- they read as their own definition otherwise.
 
@@ -387,14 +590,17 @@ def table_key_items(
         table_key: The manifest block (``column -> definition``), or None.
         translator: Target language; used only to record the English
             fallbacks, never to rewrite the supplied wording.
+        columns: Active columns from :func:`table_columns_for`; the base grid
+            when omitted.
 
     Returns:
-        One pair per column that has something to say, in table order.
+        One pair per printed column that has something to say, in table order.
     """
     tr = translator or i18n.english()
     supplied = dict(table_key or {})
+    active = columns if columns is not None else TABLE_COLUMNS
     items: list[tuple[str, str]] = []
-    for name, _ in TABLE_COLUMNS:
+    for name, _ in active:
         definition = supplied.get(name)
         if not definition:
             if name not in TABLE_KEY_COLUMNS:
@@ -428,7 +634,10 @@ def table_key_heading(
 
 
 def warn_unknown_table_key(
-    table_key: Mapping[str, str] | None, stream: TextIO | None = None
+    table_key: Mapping[str, str] | None,
+    stream: TextIO | None = None,
+    *,
+    columns: list[tuple[str, int]] | None = None,
 ) -> None:
     """Warn about ``table_key`` entries naming a column the table never prints.
 
@@ -439,12 +648,15 @@ def warn_unknown_table_key(
         table_key: The manifest block, possibly None.
         stream: Where the warning goes (stderr by default, resolved at call
             time so a redirected stderr actually receives it).
+        columns: Active columns; the base grid when omitted (so a layer
+            definition is warned about whenever its column is not shown).
     """
     if not table_key:
         return
-    columns = {name for name, _ in TABLE_COLUMNS}
+    active = columns if columns is not None else TABLE_COLUMNS
+    printed = {name for name, _ in active}
     unknown = sorted(
-        key for key in table_key if key != "heading" and key not in columns
+        key for key in table_key if key != "heading" and key not in printed
     )
     if unknown:
         print(
@@ -495,19 +707,22 @@ def load_table_key(path: Path) -> dict[str, str] | None:
 def table_key_block(
     table_key: Mapping[str, str] | None = None,
     translator: i18n.Translator | None = None,
+    *,
+    columns: list[tuple[str, int]] | None = None,
 ) -> str:
     """HTML for the key under the table (``""`` when no column needs one).
 
     Args:
         table_key: The manifest block (see :func:`table_key_items`).
         translator: Target language; English when omitted.
+        columns: Active columns; the base grid when omitted.
 
     Returns:
         A ``<section class="table-key">`` block, or an empty string when
         :func:`table_key_items` has nothing to explain.
     """
     tr = translator or i18n.english()
-    items = table_key_items(table_key, tr)
+    items = table_key_items(table_key, tr, columns=columns)
     if not items:
         return ""
     heading = html.escape(table_key_heading(table_key, tr))
@@ -797,14 +1012,17 @@ def _table_cell(name: str, row: dict[str, str]) -> str:
     return f"<td>{value}</td>"
 
 
-def _table_row(row: dict[str, str]) -> str:
+def _table_row(
+    row: dict[str, str], columns: list[tuple[str, int]] | None = None
+) -> str:
     """One ``<tr>``; a coverage-gap row also carries the ``gap-row`` class.
 
     The class is what paints the row red/italic in the template's CSS, so a
     missing article stays visible as a *row*, not just as red cell text.
     """
     cls = ' class="gap-row"' if row["gap"] else ""
-    cells = "".join(_table_cell(name, row) for name, _ in TABLE_COLUMNS)
+    active = columns if columns is not None else TABLE_COLUMNS
+    cells = "".join(_table_cell(name, row) for name, _ in active)
     return f"<tr{cls}>{cells}</tr>"
 
 
@@ -849,12 +1067,13 @@ def render_html(
             "</figure>"
         )
 
+    columns = table_columns_for(analysis)
     header_cells = "".join(
-        f"<th>{html.escape(name)}</th>"
-        for name, _ in TABLE_COLUMNS
+        f"<th>{html.escape(name)}</th>" for name, _ in columns
     )
     body_rows = [
-        _table_row(row) for row in table_rows_for(analysis, tr)
+        _table_row(row, columns)
+        for row in table_rows_for(analysis, tr, columns=columns)
     ]
 
     table_block = (
@@ -866,7 +1085,13 @@ def render_html(
     )
     # The key sits with the table it decodes, not with the caveats: a reader
     # who does not know what "YoY" means should not have to scroll for it.
-    legend_block = table_key_block(table_key, tr)
+    # The ranking sentence goes first -- it explains the *order* of the rows
+    # the reader is still looking at.
+    ranked_text = ranked_by_text(analysis, tr)
+    ranked_block = (
+        f'<p class="ranked">{html.escape(ranked_text)}</p>' if ranked_text else ""
+    )
+    legend_block = ranked_block + table_key_block(table_key, tr, columns=columns)
 
     bullets = "".join(
         f"<li>{html.escape(item)}</li>" for item in caveat_items(analysis, tr)
@@ -1155,13 +1380,14 @@ def render_pdf(
         sheet.gap(4)
 
     # --- table -------------------------------------------------------------
-    rows = table_rows_for(analysis, tr)
+    columns = table_columns_for(analysis)
+    rows = table_rows_for(analysis, tr, columns=columns)
     row_height = 12.5
     sheet.need(16 + row_height * len(rows) + 8, "comparison table")
 
     x_positions = []
     cursor_x = MARGIN
-    for _, width in TABLE_COLUMNS:
+    for _, width in columns:
         x_positions.append(cursor_x)
         cursor_x += width
 
@@ -1170,7 +1396,7 @@ def render_pdf(
     writer.rect(MARGIN, header_top - 16, CONTENT_W, 16, stroke=0, fill=1)
     writer.setFont(FONT_BOLD, 7.8)
     writer.setFillColor(WHITE)
-    for (name, width), x in zip(TABLE_COLUMNS, x_positions, strict=True):
+    for (name, width), x in zip(columns, x_positions, strict=True):
         # A translated header can be longer than its fixed column: shorten it
         # rather than let it collide with the neighbour it shares a row with.
         value = fit(name, FONT_BOLD, 7.8, width - 8)
@@ -1189,7 +1415,7 @@ def render_pdf(
         elif index % 2:
             writer.setFillColor(ZEBRA)
             writer.rect(MARGIN, sheet.y, CONTENT_W, row_height, stroke=0, fill=1)
-        for (name, width), x in zip(TABLE_COLUMNS, x_positions, strict=True):
+        for (name, width), x in zip(columns, x_positions, strict=True):
             value = row[name]
             if name == "Confidence":
                 _draw_pill(writer, row["grade"], value, x, width, sheet.y, row_height)
@@ -1212,8 +1438,20 @@ def render_pdf(
     # --- key under the table ------------------------------------------------
     # The headers are short codes; their wording is drawn here, a few points
     # below the grid, so a reader meets the decoding while the table is still
-    # in view rather than down among the caveats.
-    key_items = table_key_items(table_key, tr)
+    # in view rather than down among the caveats. The ranking sentence leads,
+    # because it explains the order of the rows still on screen.
+    ranked_text = ranked_by_text(analysis, tr)
+    if ranked_text:
+        sheet.gap(2)
+        sheet.text(
+            ranked_text,
+            FONT,
+            7.2,
+            9.4,
+            color=MUTED,
+            what="ranked-by note",
+        )
+    key_items = table_key_items(table_key, tr, columns=columns)
     if key_items:
         sheet.gap(2)
         sheet.text(
@@ -1334,7 +1572,7 @@ def main(argv: list[str] | None = None) -> int:
     # The decoding under the table comes from the manifest, never from the
     # translation catalogue: it is generated once per study, not translated.
     table_key = load_table_key(Path(args.study))
-    warn_unknown_table_key(table_key)
+    warn_unknown_table_key(table_key, columns=table_columns_for(analysis))
 
     lang = i18n.normalize_lang(args.report_lang)
     fallback = Path(f"translations.{lang}.json")

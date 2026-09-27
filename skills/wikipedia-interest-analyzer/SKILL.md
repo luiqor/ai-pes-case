@@ -251,6 +251,42 @@ language codes and the topic concept are never translated. The `Warning (pl):`
 prefix on the fallback note is fixed English so a partially-translated report
 still admits it in any language.
 
+### Data layers and the user's own criteria (optional)
+
+Two optional blocks in `study.json` let the *user's* criteria shape the study
+instead of only the defaults. Both are **off by default**: a study without
+them issues exactly the requests it always did and renders exactly the table
+it always rendered.
+
+```json
+{
+  "layers": ["access", "bot", "top"],
+  "criteria": { "rank_by": "bot_share" }
+}
+```
+
+| Layer | Adds to `analysis.json` | Answers a question like |
+|---|---|---|
+| `access` | `metrics.<lang>.access_split` (`desktop_pct`, `mobile_pct`, …) + a `Mobile %` table column | "is this read on phones?" |
+| `bot` | `metrics.<lang>.bot_share_pct` (non-user part of `all-agents` views) + `Bot %` | "how much of that is bots?" |
+| `top` | `metrics.<lang>.top_rank` (`rank`/`list_size` at the window's end) + `Rank` (`>1000` = outside the list) | "is it actually among the top pages?" |
+
+`criteria.rank_by` reorders the comparison table and prints its reason under
+the table (`Ranked by …`). Values: `share_ppm`, `yoy_share`, `mobile_share`
+(needs `"layers": ["access"]`), `bot_share` (needs `"layers": ["bot"]`, and
+**the lowest bot share leads** — the cleanest human signal first). The
+manifest refuses a layer-bound criterion without its layer, so a report can
+never be sorted by a metric it never fetched; the same order is stored at
+`comparison.ranked_by` for your answer.
+
+Notes: only columns whose metric was measured are printed — KPI tiles,
+confidence grades and the one-page budget are unchanged. Each layer costs
+extra requests (3 / 1 / 1 per language for `access` / `bot` / `top`), so add
+them when the question needs them. When you enable a layer, add its header to
+the `table_key` block too (`Mobile %`, `Bot %`, `Rank`) — an entry the table
+never prints is warned about, and a printed header without one falls back to
+the shipped English wording with a visible note.
+
 ## Answering the user's question
 
 Read `analysis.json`. Suggested mapping:
@@ -273,6 +309,10 @@ Read `analysis.json`. Suggested mapping:
   anything is growing. Cross-check `limitations` before recommending anything.
 * **"Why is this number odd?"** → `seasonality` (seasonal spikes dominate short
   windows), `trend.share.r2` (how much a straight line explains), `warnings`.
+* **"How much of that is real traffic?" / "phones or desktop?"** →
+  `metrics.<lang>.bot_share_pct` (lower = cleaner), `access_split.mobile_pct`,
+  and `top_rank.rank` (`null` = outside the top `list_size`). These exist only
+  when the layer was requested — say so instead of estimating.
 
 Always carry `assumptions` and `limitations` into your answer. Never present a
 pageview figure as market size — pageviews are **article reads, not willingness
@@ -290,6 +330,8 @@ with the same `--study`/`--out`:
 | Different concept | re-run `init --force --study …`, or pass `--qid Q…` to `resolve`/`all` |
 | Report in another language | `run.py all --report-lang <code> …` (or `init --report-lang`); translate the new `translations.<code>.json` |
 | Explain the table differently | `study.json` → `"table_key"` block (`"heading"` plus one entry per abbreviated column); printed verbatim as the key under the table |
+| Split views by device | `study.json` → `"layers": ["access"]` (adds `Mobile %` and `metrics.<lang>.access_split`) |
+| Rank by cleaner traffic, or check the top list | `"layers": ["bot"]` (or `["top"]`) plus `"criteria": {"rank_by": "bot_share"}` — see [Data layers](#data-layers-and-the-users-own-criteria-optional) |
 | Try a substitute | **ask first (step 3)**, then `run.py override --lang … --title … --study …` |
 | Force fresh data | `run.py all --no-cache --study … --out …` |
 
@@ -341,6 +383,7 @@ with the same `--study`/`--out`:
 | `warning: no translations for 'pl' at …` | first run in that language; the English reference was written — translate it and rerun |
 | `Warning (pl): Untranslated text: N of M …` | that many report strings had no translation and are in English; fill them in `translations.pl.json` and rerun — a `table_key` entry there means the manifest has no `table_key` block |
 | `table_key entries with no matching table column (ignored): …` | that key names a column the table never prints; fix or drop the entry in `study.json` |
+| `criteria.rank_by '…' requires the '…' data layer` | the ranking criterion needs data the study does not fetch; add that layer to `"layers"` in `study.json` and rerun |
 | `error: cannot read translations …` | the file is not valid JSON; fix it (a corrupt file stops the run rather than rendering English silently) |
 | `<path> already exists (use --force …)` | `i18n-template` will not overwrite a finished translation; add `--force` only to reset it |
 | `UnicodeEncodeError` printing a title | fixed by `common.configure_console()`; if you add a new entry point, call it |
@@ -361,5 +404,8 @@ with the same `--study`/`--out`:
   language edition as a proxy for the topic.
 * Data starts 2015-07; the current month is always excluded.
 * No significance testing — see `references/methods.md` §7 for why.
+* Optional data layers (`access`, `bot`, `top`) and `criteria.rank_by` add
+  table columns and a stated ranking order — never new KPI tiles, never a
+  different confidence grade, never a second page.
 * Multi-article topic clusters, daily granularity and larger date ranges are
   planned extensions rather than supported features.

@@ -172,3 +172,22 @@ requires a complete window with a clean linear fit and no seasonal dominance.
   429/5xx; the numeric rate limit was deliberately never probed.
 * Recorded fixtures in `tests/fixtures/` freeze the exact responses behind the
   golden numbers, so `uv run pytest` reproduces every published figure offline.
+
+## 9. Optional data layers and `criteria.rank_by`
+
+Off by default: requested per study in `study.json` (`"layers"`), so their
+cost is visible in the manifest and a study without them is byte-identical to
+the pre-layer behaviour.
+
+| Quantity | Definition | Notes |
+|---|---|---|
+| `access_split` | Share of the window's article views per channel: `desktop_pct`, `mobile_web_pct`, `mobile_app_pct`, and `mobile_pct = web + app`; denominator is the base `all-access` total | The three channels sum to `all-access` exactly (verified 2026-09-27), so this is a partition of what the study already measured, not a new estimate |
+| `bot_share_pct` | `(all_agents - user) / all_agents * 100` over the window, clamped at 0 | `all-agents = user + spider + automated` exactly (verified), so the difference is precisely non-user traffic; a traffic-quality gauge, not audience size |
+| `top_rank` | `{month, rank, list_size}` in the project's monthly top list at the window's last month | `rank: null` = outside the listed top `list_size`, printed as `>N` and never as 0; a month the endpoint has not loaded yet is skipped with a warning |
+| `comparison.ranked_by` | `{criterion, order}` — measured languages, best first, for `criteria.rank_by` | `bot_share` ranks **ascending** (cleanest human traffic leads); ties break on the language code; a language with no value for the criterion is left out of the order rather than scored 0 |
+
+Design decisions: a layer adds table columns only — never a KPI tile, never a
+different confidence grade, never a second page. The report prints its ranking
+reason under the table (`Ranked by …`) so a reordered table explains itself,
+and a layer-bound criterion without its layer is refused at the manifest
+(`payloads.validate_study`) instead of silently falling back to another order.

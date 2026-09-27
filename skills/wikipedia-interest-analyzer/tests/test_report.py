@@ -666,3 +666,252 @@ def test_fit_leaves_a_header_that_already_fits_untouched():
     assert report_mod.fit("Confidence", report_mod.FONT_BOLD, 7.8, 100.0) == (
         "Confidence"
     )
+
+
+# ------------------------------------------------------- optional columns ---
+def _with_layers(analysis, layers=("access", "bot", "top")):
+    """A copy of an analysis carrying the metrics those layers would produce."""
+    for metric in analysis["metrics"].values():
+        if "access" in layers:
+            metric["access_split"] = {
+                "total_views": metric["article_total"],
+                "desktop_pct": 40.0,
+                "mobile_web_pct": 30.0,
+                "mobile_app_pct": 30.0,
+                "mobile_pct": 60.0,
+            }
+        if "bot" in layers:
+            metric["bot_share_pct"] = 12.5
+        if "top" in layers:
+            metric["top_rank"] = {
+                "month": "2026-08",
+                "rank": 7,
+                "list_size": 1000,
+            }
+    return analysis
+
+
+def test_the_base_grid_is_unchanged_when_no_layer_was_measured(golden_analysis):
+    """A study without layers must render the catalogue's grid, byte for byte."""
+    assert report_mod.table_columns_for(golden_analysis) == report_mod.TABLE_COLUMNS
+
+
+@pytest.mark.parametrize(
+    "layers",
+    [
+        ("access",),
+        ("bot",),
+        ("top",),
+        ("access", "bot"),
+        ("access", "top"),
+        ("bot", "top"),
+        ("access", "bot", "top"),
+    ],
+)
+def test_every_layer_combination_fills_the_page_and_fits_its_headers(
+    golden_analysis, layers
+):
+    """Extra columns may never widen the grid or truncate a header.
+
+    The one-page budget is the whole design: the columns re-fit to the page
+    width by giving up room in proportion to their slack, and no header is
+    allowed to be shortened away from its own name.
+    """
+    columns = report_mod.table_columns_for(_with_layers(golden_analysis, layers))
+
+    assert sum(width for _, width in columns) == report_mod.CONTENT_W
+    assert [name for name, _ in columns] == [
+        name for name, _ in report_mod.TABLE_COLUMNS
+    ] + _with_layers_headers(layers)
+    for name, width in columns:
+        assert report_mod.fit(name, report_mod.FONT_BOLD, 7.8, width - 8) == name, (
+            f"{name!r} does not fit the {width}pt column"
+        )
+
+
+def _with_layers_headers(layers):
+    names = []
+    if "access" in layers:
+        names.append("Mobile %")
+    if "bot" in layers:
+        names.append("Bot %")
+    if "top" in layers:
+        names.append("Rank")
+    return names
+
+
+def test_layer_columns_carry_the_layer_values(golden_analysis, tmp_path):
+    """The numbers the layers measured reach the reader, correctly formatted."""
+    out = tmp_path / "report.html"
+    report_mod.render_html(_with_layers(golden_analysis), None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert "<th>Mobile %</th>" in html
+    assert "<th>Bot %</th>" in html
+    assert "<th>Rank</th>" in html
+    assert "<td>60.0%</td>" in html
+    assert "<td>12.5%</td>" in html
+    assert "<td>7</td>" in html
+
+
+def test_a_language_ranked_outside_the_list_reads_as_outside_it(
+    golden_analysis, tmp_path
+):
+    """``rank: None`` means "not in the top N" -- a result, never a blank."""
+    _with_layers(golden_analysis)
+    golden_analysis["metrics"]["cs"]["top_rank"] = {
+        "month": "2026-08",
+        "rank": None,
+        "list_size": 1000,
+    }
+    rows = report_mod.table_rows_for(golden_analysis)
+
+    ranked = next(row for row in rows if row["Lang"] == "cs")
+    unranked = next(row for row in rows if row["Lang"] == "pl")
+    assert ranked["Rank"] == ">1000"
+    assert unranked["Rank"] == "7"
+
+
+def test_a_gap_row_stays_a_dash_in_every_layer_column(gap_analysis):
+    """A language with no article must not appear to have a layer value."""
+    _with_layers(gap_analysis)
+    rows = report_mod.table_rows_for(gap_analysis, columns=None)
+
+    gap_row = next(row for row in rows if row["gap"])
+    for name in ("Mobile %", "Bot %", "Rank"):
+        assert gap_row[name] == "\u2014"
+
+
+def test_the_key_explains_only_the_columns_that_are_printed(golden_analysis):
+    """An unprinted layer column costs no one-page space and says nothing."""
+    base = report_mod.table_key_items()
+    assert [code for code, _ in base] == ["Share/M", "YoY", "YoY share", "R\u00b2"]
+
+    layered = report_mod.table_key_items(
+        columns=report_mod.table_columns_for(_with_layers(golden_analysis))
+    )
+    codes = [code for code, _ in layered]
+    assert "Mobile %" in codes
+    assert "Bot %" in codes
+    assert "Rank" in codes
+    # The definitions come from the defaults until the manifest writes its own.
+    assert all(len(definition) > 20 for _, definition in layered)
+
+
+def test_warn_unknown_table_key_understands_optional_columns(capsys):
+    """A layer definition is honoured only when its column is actually shown."""
+    report_mod.warn_unknown_table_key({"Mobile %": "[xx] wording"})
+    assert "Mobile %" in capsys.readouterr().err
+
+    columns = report_mod.OPTIONAL_TABLE_COLUMNS
+    report_mod.warn_unknown_table_key(
+        {"Mobile %": "[xx] wording"},
+        columns=report_mod.TABLE_COLUMNS
+        + [("Mobile %", columns["Mobile %"])],
+    )
+    assert capsys.readouterr().err == ""
+
+
+def test_the_ranking_sentence_names_the_criterion(golden_analysis, tmp_path):
+    """A reordered table must say who reordered it, in the report's language."""
+    golden_analysis["comparison"]["ranked_by"] = {
+        "criterion": "bot_share",
+        "order": ["cs", "pl"],
+    }
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert 'class="ranked"' in html
+    assert "Ranked by human traffic (lowest bot share), best first." in html
+
+
+def test_without_a_criterion_no_ranking_sentence_is_printed(
+    golden_analysis, tmp_path
+):
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out)
+    assert 'class="ranked"' not in out.read_text(encoding="utf-8")
+
+
+def test_the_table_rows_follow_the_stated_ranking(golden_analysis):
+    """The sentence and the order must agree: the table shows ``order``."""
+    golden_analysis["comparison"]["ranked_by"] = {
+        "criterion": "bot_share",
+        "order": ["cs", "pl"],
+    }
+    rows = report_mod.table_rows_for(golden_analysis)
+
+    measured = [row["Lang"] for row in rows if not row["gap"]]
+    assert measured == ["cs", "pl"]
+
+
+def test_the_layered_one_page_pdf_still_fits(golden_analysis, tmp_path):
+    """Three extra columns and a ranking sentence cost no extra page."""
+    _with_layers(golden_analysis)
+    golden_analysis["comparison"]["ranked_by"] = {
+        "criterion": "bot_share",
+        "order": ["cs", "pl"],
+    }
+    out = tmp_path / "report.pdf"
+
+    report_mod.render_pdf(golden_analysis, None, out)
+
+    assert out.exists()
+    assert _page_count(out) == 1
+
+
+def test_the_layered_html_carries_the_key_and_the_ranking(
+    golden_analysis, tmp_path
+):
+    """Both edits that sit *under* the table travel together in one render."""
+    _with_layers(golden_analysis)
+    golden_analysis["comparison"]["ranked_by"] = {
+        "criterion": "mobile_share",
+        "order": ["pl", "cs"],
+    }
+    out = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, out, table_key=COMPLETE_TABLE_KEY)
+    html = out.read_text(encoding="utf-8")
+
+    assert "Ranked by mobile share of views, best first." in html
+    assert "<dt>Mobile %</dt>" in html
+
+
+def test_gap_rows_trail_the_ranked_languages(gap_analysis):
+    """Reordering the measured languages must never promote a gap row."""
+    gap_analysis["comparison"]["ranked_by"] = {
+        "criterion": "share_ppm",
+        "order": ["cs"],
+    }
+    rows = report_mod.table_rows_for(gap_analysis)
+
+    assert [(row["Lang"], row["gap"]) for row in rows] == [("cs", ""), ("pl", "gap")]
+
+
+def test_the_full_layered_payload_still_fits_one_page(golden_analysis, tmp_path):
+    """Metrics are not the whole cost: the layer *wording* must fit too.
+
+    `analyze.py` appends one limitation per measured layer and the report
+    prints its ranking sentence, and a real run also embeds the chart -- all
+    three eat the one-page budget together. Rendering the metrics alone with
+    no chart (as an earlier version of this test did) hid a PDF that
+    overflowed by a point in actual use.
+    """
+    import chart as chart_mod
+
+    _with_layers(golden_analysis)
+    # Exactly what analyze.py appends when all three layers were measured.
+    ref = {"id": "limitation.layers_all"}
+    golden_analysis["limitations"] += [i18n.english().render(ref)]
+    golden_analysis["limitations_i18n"] += [ref]
+    golden_analysis["comparison"]["ranked_by"] = {
+        "criterion": "bot_share",
+        "order": ["cs", "pl"],
+    }
+    chart_png = Path(chart_mod.render(golden_analysis, tmp_path / "chart")["png"])
+    out = tmp_path / "report.pdf"
+
+    report_mod.render_pdf(golden_analysis, chart_png, out)
+
+    assert _page_count(out) == 1
