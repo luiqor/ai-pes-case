@@ -1,7 +1,7 @@
 [project]
 name = "wikipedia-interest-analyzer"
 version = "0.1.0"
-description = "Analyze Wikipedia pageview data: resolve topics to articles, fetch views, compute trends, chart, and produce a one-page report."
+description = "Analyze Wikipedia pageview data: resolve topics to articles, fetch views, compute trends, chart, and produce a paginated HTML/PDF report."
 requires-python = ">=3.12"
 dependencies = [
     "matplotlib>=3.9",

@@ -1,10 +1,16 @@
-"""Produce the shareable report: a self-contained HTML file and a one-page PDF.
+"""Produce the shareable report: a self-contained HTML file and a matching PDF.
 
-The PDF is **strictly one page**: layout is driven by an explicit vertical
-cursor, and every block asks for the space it needs before drawing. If the
-content does not fit, a ``ReportOverflow`` is raised and *no PDF is written* --
-the caller is told which block overflowed instead of silently emitting a
-two-page document.
+The two renderers are built from the same data builders, so they cannot
+disagree about *what* the report says: the PDF carries every block the HTML
+does (masthead, verdict, KPI tiles, chart, table, key, success criteria,
+caveats, footer).
+
+Layout is driven by an explicit vertical cursor, and every block asks for the
+space it needs before drawing. The cursor breaks a page whenever the next
+block would cross the bottom margin, so a long report simply continues on a
+second page -- nothing is dropped to make it fit. ``ReportOverflow`` is
+reserved for a block that would not fit on an *empty* page; in that case no
+PDF is written and the caller is told which block is impossible.
 
 Charts and typography use fonts shipped with the pinned matplotlib dependency
 (DejaVu), so accented titles such as ``Přerušovaný půst`` render correctly
@@ -24,9 +30,9 @@ import html
 import math
 import string
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, TypedDict
 
 import common
 import i18n
@@ -82,6 +88,16 @@ GRADE_PILLS: dict[str, tuple[Color, Color]] = {
 }
 
 MAX_CHART_HEIGHT = 250.0
+
+#: KPI tile grid geometry for the PDF -- the same grid the HTML template
+#: builds with ``repeat(auto-fit, minmax(150px, 1fr))``: a tile is never
+#: narrower than ``KPI_MIN_W`` (150px in points), never more than
+#: ``KPI_MAX_COLS`` sit side by side, and the rest flow into further rows
+#: instead of being squeezed.
+KPI_MIN_W = 112.5
+KPI_MAX_COLS = 4
+KPI_GAP = 8.0
+KPI_TILE_H = 116.0
 
 #: The **base** printed column headers and their widths in points; the widths
 #: add up to ``CONTENT_W`` exactly, so the grid fills the page edge to edge.
@@ -166,7 +182,7 @@ TABLE_KEY_DEFAULTS: dict[str, str] = {
 
 
 class ReportOverflow(RuntimeError):
-    """Raised when the report cannot be squeezed onto a single page."""
+    """Raised when a block cannot be printed even on a whole empty page."""
 
 
 # --------------------------------------------------------------------------
@@ -635,20 +651,49 @@ def criteria_summaries(
     return summaries
 
 
-def criteria_line(
+def criteria_view(
     analysis: AnalysisPayload, translator: i18n.Translator | None = None
-) -> str:
-    """The single sentence the strictly-one-page PDF prints (``""`` if none).
+) -> tuple[str, list[str], str] | None:
+    """The success-criteria block as plain strings: heading, rules, summary.
 
-    The PDF gets one line, not a block: this is the verdict the reader needs,
-    and the one-page budget has no room for the full breakdown the HTML
-    carries (see ``criteria_block_html``).
+    One builder, two renderers: the HTML escapes these strings into its
+    ``<section class="criteria">`` and the PDF draws the very same lines, so
+    the two artifacts can never grade the user's rules differently.
+
+    Values are deliberately not printed -- units differ per metric (views,
+    per-million share, a grade) and the numbers live in ``analysis.json``;
+    the report shows the verdict the user asked for.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        translator: Target language; English when omitted.
+
+    Returns:
+        ``(heading, rule lines, summary)``, or ``None`` when the study asked
+        for no rules (both renderers then print nothing).
     """
+    criteria = _criteria_of(analysis)
+    if not criteria:
+        return None
     tr = translator or i18n.english()
-    summaries = criteria_summaries(analysis, tr)
-    if not summaries:
-        return ""
-    return tr.t("criteria.line", summaries=tr.t("join.comma").join(summaries))
+    rules: list[str] = []
+    for rule in criteria["success"]:
+        results = [
+            f"{language} {_verdict_glyph(verdicts, str(rule['id']))}"
+            for language, verdicts in criteria["verdicts"].items()
+        ]
+        rules.append(
+            tr.t(
+                "criteria.rule",
+                rule=_rule_text(rule, tr),
+                results=tr.t("join.comma").join(results),
+            )
+        )
+    summary = tr.t(
+        "criteria.summary",
+        summaries=tr.t("join.comma").join(criteria_summaries(analysis, tr)),
+    )
+    return tr.t("criteria.heading"), rules, summary
 
 
 def criteria_block_html(
@@ -656,42 +701,36 @@ def criteria_block_html(
 ) -> str:
     """The HTML block: every rule with each language's mark, then the summary.
 
-    Values are deliberately not printed -- units differ per metric (views,
-    per-million share, a grade) and the numbers live in ``analysis.json``;
-    the report shows the verdict the user asked for.
+    Wording comes from :func:`criteria_view`; this function only escapes it
+    and wraps it in the markup the template's CSS styles.
     """
-    criteria = _criteria_of(analysis)
-    if not criteria:
+    view = criteria_view(analysis, translator)
+    if not view:
         return ""
-    tr = translator or i18n.english()
-    rows: list[str] = []
-    for rule in criteria["success"]:
-        results = [
-            f"{language} {_verdict_glyph(verdicts, str(rule['id']))}"
-            for language, verdicts in criteria["verdicts"].items()
-        ]
-        rows.append(
-            "<li>"
-            + html.escape(
-                tr.t(
-                    "criteria.rule",
-                    rule=_rule_text(rule, tr),
-                    results=tr.t("join.comma").join(results),
-                )
-            )
-            + "</li>"
-        )
-    summary = html.escape(
-        tr.t(
-            "criteria.summary",
-            summaries=tr.t("join.comma").join(criteria_summaries(analysis, tr)),
-        )
-    )
-    heading = html.escape(tr.t("criteria.heading"))
+    heading, rules, summary = view
+    rows = "".join(f"<li>{html.escape(rule)}</li>" for rule in rules)
     return (
-        f'<section class="criteria"><h3>{heading}</h3>'
-        f'<ul>{"".join(rows)}</ul>'
-        f'<p class="criteria-summary">{summary}</p></section>'
+        f'<section class="criteria"><h3>{html.escape(heading)}</h3>'
+        f"<ul>{rows}</ul>"
+        f'<p class="criteria-summary">{html.escape(summary)}</p></section>'
+    )
+
+
+def gaps_note_text(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> str:
+    """The plain sentence naming languages with no article (``""`` if none).
+
+    One wording for both renderers: the HTML wraps it in a ``<span>``, the
+    PDF appends it to the verdict panel.
+    """
+    tr = translator or i18n.english()
+    gaps = analysis.get("gaps", [])
+    if not gaps:
+        return ""
+    return tr.t(
+        "report.gaps_note",
+        langs=tr.t("join.comma").join(gaps),
     )
 
 
@@ -699,14 +738,9 @@ def gaps_note(
     analysis: AnalysisPayload, translator: i18n.Translator | None = None
 ) -> str:
     """Inline HTML noting languages with no article (empty string if none)."""
-    tr = translator or i18n.english()
-    gaps = analysis.get("gaps", [])
-    if not gaps:
+    note = gaps_note_text(analysis, translator)
+    if not note:
         return ""
-    note = tr.t(
-        "report.gaps_note",
-        langs=tr.t("join.comma").join(gaps),
-    )
     return f' <span class="gap">{html.escape(note)}</span>'
 
 
@@ -727,8 +761,7 @@ def table_key_items(
     finished.
 
     Only columns that are actually printed are explained: an optional layer
-    column that never appeared would push redundant wording into a
-    one-page budget.
+    column that never appeared would push redundant wording into the report.
 
     Columns outside :data:`TABLE_KEY_COLUMNS` are printed only when the
     manifest supplies them -- they read as their own definition otherwise.
@@ -983,37 +1016,119 @@ def sparkline_svg(
     )
 
 
-def kpi_tiles_for(
+class KpiTile(TypedDict):
+    """One KPI card's worth of data; the HTML and the PDF draw exactly this."""
+
+    lang: str
+    gap: bool
+    grade: str
+    pill: str
+    title: str
+    kind: str
+    arrow: str
+    hero: str
+    hero_label: str
+    stats: list[tuple[str, str]]
+    sparkline: list[float]
+    colour: str
+
+
+def kpi_tiles_data(
     analysis: AnalysisPayload, translator: i18n.Translator | None = None
-) -> str:
-    """The KPI tile grid: one card per measured language, then gap cards.
+) -> list[KpiTile]:
+    """The KPI tile model both renderers draw: one dict per tile, gaps last.
 
     Each tile answers "how big, which way, how much do we trust it" without
     reading the table: a big YoY-share number with an arrow, the two
-    supporting counts, a confidence pill and a sparkline of the real monthly
-    share series. Coverage gaps get their own dashed card, so a missing
-    article stays visible instead of vanishing from the summary.
+    supporting counts, a confidence grade and the real monthly share series
+    for a sparkline. Coverage gaps get their own tile, so a missing article
+    stays visible instead of vanishing from the summary.
 
     Args:
         analysis: The ``analysis.json`` payload.
         translator: Target language; English when omitted.
 
     Returns:
-        HTML for a ``<section class="kpis">`` block ("" with no metrics *and*
-        no gaps -- nothing to summarise).
+        Tile dicts (empty when there are no metrics *and* no gaps). Keys:
+        ``lang``, ``gap``, ``grade``, ``pill``, ``title``, ``kind``,
+        ``arrow``, ``hero``, ``hero_label``, ``stats`` (label/value pairs),
+        ``sparkline`` (share-per-million values) and ``colour``.
     """
     tr = translator or i18n.english()
-    tiles: list[str] = []
+    tiles: list[KpiTile] = []
     for language, metric in analysis["metrics"].items():
         yoy = metric["yoy"]
         share_pct = yoy.get("share_pct")
         kind = trend_class(share_pct)
         series = metric.get("series")
-        sparkline = sparkline_svg(
-            list(series["share_ppm"]) if series else [],
-            _colour_for(analysis, language),
-            tr.t("report.sparkline_alt", lang=language),
+        tiles.append(
+            {
+                "lang": language,
+                "gap": False,
+                "grade": metric["confidence"],
+                "pill": tr.t(f"confidence.{metric['confidence']}").upper(),
+                "title": metric["article_title"],
+                "kind": kind,
+                "arrow": trend_arrow(kind),
+                "hero": fmt_pct(share_pct, tr),
+                "hero_label": tr.t("report.kpi_yoy"),
+                "stats": [
+                    (f"{metric['article_total']:,}", tr.t("report.kpi_views")),
+                    (f"{metric['share_ppm']:.2f}", tr.t("report.kpi_share")),
+                ],
+                "sparkline": list(series["share_ppm"]) if series else [],
+                "colour": _colour_for(analysis, language),
+            }
         )
+    for language in analysis.get("gaps", []):
+        tiles.append(
+            {
+                "lang": language,
+                "gap": True,
+                "grade": "gap",
+                "pill": tr.t("report.gap_confidence"),
+                "title": tr.t("report.gap_article"),
+                "kind": "flat",
+                "arrow": "",
+                "hero": tr.t("report.na"),
+                "hero_label": tr.t("report.kpi_yoy"),
+                "stats": [],
+                "sparkline": [],
+                "colour": common.SERIES_COLOURS[0],
+            }
+        )
+    return tiles
+
+
+def kpi_tiles_for(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> str:
+    """The HTML KPI tile grid built from :func:`kpi_tiles_data`.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        translator: Target language; English when omitted.
+
+    Returns:
+        HTML for a ``<section class="kpis">`` block (``""`` with no metrics
+        *and* no gaps -- nothing to summarise).
+    """
+    tr = translator or i18n.english()
+    tiles: list[str] = []
+    for tile in kpi_tiles_data(analysis, tr):
+        if tile["gap"]:
+            tiles.append(
+                '<article class="tile gap-tile">'
+                '<div class="tile-head">'
+                f'<span class="tile-lang">{html.escape(tile["lang"])}</span>'
+                f"{confidence_pill_html('gap', tile['pill'])}</div>"
+                f'<div class="tile-title">{html.escape(tile["title"])}</div>'
+                '<div class="tile-hero flat"><span class="arrow" '
+                f'aria-hidden="true"></span>{html.escape(tile["hero"])}</div>'
+                f'<div class="tile-hero-label">{html.escape(tile["hero_label"])}</div>'
+                "</article>"
+            )
+            continue
         tiles.append(
             '<article class="tile" style="--series:{}">'
             '<div class="tile-head">'
@@ -1026,35 +1141,24 @@ def kpi_tiles_for(
             '<div class="tile-stat"><b>{}</b><span>{}</span></div>'
             '<div class="tile-stat"><b>{}</b><span>{}</span></div>'
             "</div>{}</article>".format(
-                _colour_for(analysis, language),
-                html.escape(language),
-                confidence_pill_html(
-                    metric["confidence"],
-                    tr.t(f"confidence.{metric['confidence']}").upper(),
+                tile["colour"],
+                html.escape(tile["lang"]),
+                confidence_pill_html(tile["grade"], tile["pill"]),
+                html.escape(tile["title"]),
+                tile["kind"],
+                tile["arrow"],
+                html.escape(tile["hero"]),
+                html.escape(tile["hero_label"]),
+                tile["stats"][0][0],
+                html.escape(tile["stats"][0][1]),
+                tile["stats"][1][0],
+                html.escape(tile["stats"][1][1]),
+                sparkline_svg(
+                    tile["sparkline"],
+                    tile["colour"],
+                    tr.t("report.sparkline_alt", lang=tile["lang"]),
                 ),
-                html.escape(metric["article_title"]),
-                kind,
-                trend_arrow(kind),
-                html.escape(fmt_pct(share_pct, tr)),
-                html.escape(tr.t("report.kpi_yoy")),
-                f"{metric['article_total']:,}",
-                html.escape(tr.t("report.kpi_views")),
-                f"{metric['share_ppm']:.2f}",
-                html.escape(tr.t("report.kpi_share")),
-                sparkline,
             )
-        )
-    for language in analysis.get("gaps", []):
-        tiles.append(
-            '<article class="tile gap-tile">'
-            '<div class="tile-head">'
-            f'<span class="tile-lang">{html.escape(language)}</span>'
-            f"{confidence_pill_html('gap', tr.t('report.gap_confidence'))}</div>"
-            f'<div class="tile-title">{html.escape(tr.t("report.gap_article"))}</div>'
-            '<div class="tile-hero flat"><span class="arrow" aria-hidden="true"></span>'
-            f'{html.escape(tr.t("report.na"))}</div>'
-            f'<div class="tile-hero-label">{html.escape(tr.t("report.kpi_yoy"))}</div>'
-            "</article>"
         )
     if not tiles:
         return ""
@@ -1070,9 +1174,10 @@ def caveat_items(
     """Everything the reader must weigh: warnings, then limitations, then assumptions.
 
     Runtime warnings used to reach only ``analysis.json``, so a reader of the
-    one-page PDF could not tell that e.g. an unalignable window had capped the
+    PDF could not tell that e.g. an unalignable window had capped the
     confidence grade. The report is the shareable artifact; it must carry them.
-    Exact duplicates are dropped so repeated wording cannot spend one-page space.
+    Exact duplicates are dropped: a caveat stated twice is a caveat hedged
+    twice, and it only pushes the rest further down the page.
 
     Args:
         analysis: The ``analysis.json`` payload.
@@ -1293,31 +1398,105 @@ def render_html(
 
 
 # --------------------------------------------------------------------------
-# PDF -- strictly one page
+# PDF -- the HTML's content, flowed over as many pages as it needs
 # --------------------------------------------------------------------------
-class _Sheet:
-    """Vertical layout cursor that refuses to draw past the bottom margin."""
+def pdf_glyphs(value: str) -> str:
+    """Swap DejaVu-only marks for their Helvetica-safe lookalikes.
 
-    def __init__(self, writer: pdf_canvas.Canvas) -> None:
-        """Place the cursor at the top margin of ``writer``."""
+    ``✓``, ``✗``, ``▲`` and ``▼`` live in the font shipped with matplotlib,
+    which is the normal case. When that font is unavailable the report falls
+    back to Helvetica, whose glyph set has none of them -- and a reader who
+    sees four black boxes instead of a verdict has learned nothing.
+
+    Args:
+        value: Text about to be drawn with :data:`FONT`.
+
+    Returns:
+        ``value`` unchanged when the Unicode font is registered, else with
+        the four marks replaced by ASCII characters of the same meaning.
+    """
+    if FONT.startswith("WIA-"):
+        return value
+    return value.translate(
+        {0x2713: ord("+"), 0x2717: ord("x"), 0x25B2: ord("^"), 0x25BC: ord("v")}
+    )
+
+
+class _Sheet:
+    """Vertical layout cursor that breaks a page at the bottom margin.
+
+    ``need`` closes the current sheet (footer first) and opens a fresh one
+    whenever a block would cross the margin, so a long report continues on
+    page two instead of being refused. :class:`ReportOverflow` survives for
+    one situation only: a block that would not fit on an *empty* page -- then
+    there is no honest way to print it, and the caller is told which block.
+    """
+
+    def __init__(
+        self,
+        writer: pdf_canvas.Canvas,
+        page_footer: Callable[[int], None] | None = None,
+    ) -> None:
+        """Place the cursor at the top margin of ``writer``.
+
+        Args:
+            writer: The canvas being filled.
+            page_footer: Optional ``f(page_number)`` called with the number of
+                the page being closed, so every sheet carries the attribution
+                line. It is *not* called for the last page -- the caller
+                draws that one itself, right before ``showPage``.
+        """
         self.writer = writer
+        self._page_footer = page_footer
+        self.y = PAGE_H - MARGIN
+        self.pages = 1
+
+    @property
+    def at_top(self) -> bool:
+        """True when nothing has been drawn on the current page yet."""
+        return self.y >= PAGE_H - MARGIN - 0.01
+
+    def new_page(self) -> None:
+        """Close the current page (footer first) and start a fresh one."""
+        if self._page_footer is not None:
+            self._page_footer(self.pages)
+        self.writer.showPage()
+        self.pages += 1
         self.y = PAGE_H - MARGIN
 
-    def need(self, height: float, what: str) -> None:
-        """Reserve ``height`` points for the block named ``what``.
+    def need(self, height: float, what: str) -> bool:
+        """Reserve ``height`` points, breaking a page first when needed.
+
+        Args:
+            height: Points the block needs.
+            what: Block name, used in the overflow message.
+
+        Returns:
+            ``True`` when a page was broken (a caller repeating a header can
+            redraw it), ``False`` when the block fits where it stands.
 
         Raises:
-            ReportOverflow: When the reservation would cross the bottom
-                margin; the message names the block and the shortfall.
+            ReportOverflow: When the block is taller than an empty page, or
+                when breaking would print a blank sheet (nothing drawn yet
+                and the block still does not fit).
         """
-        if self.y - height < BOTTOM:
-            shortfall = BOTTOM - (self.y - height)
+        if self.y - height >= BOTTOM:
+            return False
+        usable = PAGE_H - MARGIN - BOTTOM
+        if height > usable:
             raise ReportOverflow(
-                f"report does not fit on one page: '{what}' needs {height:.0f}pt "
-                f"but only {max(0.0, self.y - BOTTOM):.0f}pt remained "
-                f"(short by {shortfall:.0f}pt). Shorten that block, drop a "
-                "language, or widen the window's summary text."
+                f"report cannot be printed: '{what}' needs {height:.0f}pt but "
+                f"a whole page only offers {usable:.0f}pt of usable height. "
+                "Shorten that block or split the study."
             )
+        if self.at_top:
+            raise ReportOverflow(
+                f"report cannot be printed: '{what}' needs {height:.0f}pt and "
+                f"nothing fits above it on an empty page ({usable:.0f}pt "
+                "usable). Shorten that block or split the study."
+            )
+        self.new_page()
+        return True
 
     def text(
         self,
@@ -1332,7 +1511,13 @@ class _Sheet:
         what: str = "text",
         indent: float = 0.0,
     ) -> None:
-        """Wrap and draw one block, refusing first if it would overflow.
+        """Wrap and draw one block, breaking a page wherever it runs out.
+
+        Space is reserved per *line*, so a paragraph longer than the room
+        left on a page simply starts again on the next one -- no block is
+        ever dropped to keep the report short. Font and colour are re-asserted
+        per line because breaking the sheet resets the canvas to its default
+        Helvetica 12 in black.
 
         Args:
             value: Text to draw (wrapped to ``max_width - indent``).
@@ -1345,11 +1530,11 @@ class _Sheet:
             what: Block name used in the overflow message (keyword-only).
             indent: Extra left inset for the wrapped lines (keyword-only).
         """
-        lines = wrap(value, font, size, max_width - indent)
-        self.need(leading * len(lines) + 2, what)
-        self.writer.setFont(font, size)
-        self.writer.setFillColor(color)
+        lines = wrap(pdf_glyphs(value), font, size, max_width - indent)
         for line in lines:
+            self.need(leading, what)
+            self.writer.setFont(font, size)
+            self.writer.setFillColor(color)
             self.y -= leading
             self.writer.drawString(x + indent, self.y, line)
         self.y -= 2
@@ -1417,6 +1602,147 @@ def _draw_pill(
     writer.drawCentredString(pill_x + pill_w / 2, pill_y + 2.6, label)
 
 
+def _kpi_columns(count: int) -> int:
+    """How many KPI tiles stand side by side when there are ``count`` of them.
+
+    Mirrors the HTML grid's own rules (``minmax(150px, 1fr)``): as many as
+    fit at :data:`KPI_MIN_W` wide, never more than :data:`KPI_MAX_COLS`,
+    never more than there are tiles -- the rest flow into further rows.
+
+    Args:
+        count: Tiles to place (0 still yields 1; the caller draws nothing).
+
+    Returns:
+        The column count for the grid.
+    """
+    if count < 2:
+        return 1
+    by_width = int((CONTENT_W + KPI_GAP) // (KPI_MIN_W + KPI_GAP))
+    return max(1, min(count, KPI_MAX_COLS, by_width))
+
+
+def _draw_sparkline(
+    writer: pdf_canvas.Canvas,
+    values: list[float],
+    colour: str,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+) -> None:
+    """Draw a tile's month-by-month share line -- the HTML's inline SVG.
+
+    Args:
+        writer: Canvas to draw on.
+        values: Monthly share-per-million values.
+        colour: Hex stroke colour; its translucent copy fills the area under
+            the line, exactly as the SVG does.
+        x: Left edge of the drawing area.
+        y: Bottom edge of the drawing area.
+        width: Area width in points.
+        height: Area height in points.
+
+    Fewer than two points cannot show a trend, so nothing is drawn -- the
+    same refusal the SVG builder makes.
+    """
+    if len(values) < 2:
+        return
+    lo, hi = min(values), max(values)
+    span = (hi - lo) or 1.0
+    pad = 2.0
+    step = (width - 2 * pad) / (len(values) - 1)
+    points = [
+        (
+            x + pad + index * step,
+            y + pad + (height - 2 * pad) * (1 - (value - lo) / span),
+        )
+        for index, value in enumerate(values)
+    ]
+    stroke = HexColor(colour)
+    area = writer.beginPath()
+    area.moveTo(points[0][0], y + pad)
+    for point in points:
+        area.lineTo(point[0], point[1])
+    area.lineTo(points[-1][0], y + pad)
+    area.close()
+    writer.setFillColor(Color(stroke.red, stroke.green, stroke.blue, 0.13))
+    writer.drawPath(area, stroke=0, fill=1)
+    line = writer.beginPath()
+    line.moveTo(*points[0])
+    for point in points[1:]:
+        line.lineTo(point[0], point[1])
+    writer.setStrokeColor(stroke)
+    writer.setLineWidth(1.6)
+    writer.drawPath(line, stroke=1, fill=0)
+
+
+def _draw_kpi_tile(
+    writer: pdf_canvas.Canvas, tile: KpiTile, x: float, y: float, width: float
+) -> None:
+    """Draw one KPI card at ``x``/``y``: grade, hero figure, stats, sparkline.
+
+    The interior follows the HTML tile's order (language + badge, article
+    title, hero figure with its arrow, the label under it, two supporting
+    counts, sparkline), so a reader who knows one artifact recognises the
+    other. Coverage gaps get a dashed accent bar and no stats -- a missing
+    article must not look like a measured one.
+    """
+    height = KPI_TILE_H
+    top = y + height
+    writer.setFillColor(WHITE)
+    writer.rect(x, y, width, height, stroke=0, fill=1)
+    writer.setStrokeColor(RULE)
+    writer.setLineWidth(1.0)
+    writer.rect(x, y, width, height, stroke=1, fill=0)
+    if tile["gap"]:
+        writer.saveState()
+        writer.setDash(3, 2)
+        writer.setFillColor(GAP_FG)
+        writer.rect(x, top - 3, width, 3, stroke=0, fill=1)
+        writer.restoreState()
+    else:
+        writer.setFillColor(HexColor(tile["colour"]))
+        writer.rect(x, top - 3, width, 3, stroke=0, fill=1)
+
+    pad = 8.0
+    inner = width - 2 * pad
+    writer.setFont(FONT_BOLD, 8)
+    writer.setFillColor(GAP_FG if tile["gap"] else HexColor(tile["colour"]))
+    writer.drawString(x + pad, top - 16, pdf_glyphs(tile["lang"]))
+    _draw_pill(writer, tile["grade"], tile["pill"], x + pad, inner, top - 23, 13)
+    writer.setFont(FONT, 7)
+    writer.setFillColor(MUTED)
+    writer.drawString(x + pad, top - 30, fit(tile["title"], FONT, 7, inner))
+
+    hero_colour = {"up": UP_FG, "down": DOWN_FG}.get(tile["kind"], FLAT_FG)
+    if tile["gap"]:
+        hero_colour = GAP_FG
+    writer.setFont(FONT_BOLD, 16)
+    writer.setFillColor(hero_colour)
+    writer.drawString(
+        x + pad, top - 52, pdf_glyphs(f"{tile['arrow']}{tile['hero']}")
+    )
+    writer.setFont(FONT_BOLD, 6.5)
+    writer.setFillColor(MUTED)
+    writer.drawString(x + pad, top - 63, tile["hero_label"].upper())
+
+    if tile["stats"]:
+        half = inner / 2
+        for index, (value, label) in enumerate(tile["stats"]):
+            cell_x = x + pad + index * half
+            writer.setFont(FONT_BOLD, 9.5)
+            writer.setFillColor(INK)
+            writer.drawString(cell_x, top - 78, value)
+            writer.setFont(FONT_BOLD, 6.5)
+            writer.setFillColor(MUTED)
+            writer.drawString(
+                cell_x, top - 87, fit(label.upper(), FONT_BOLD, 6.5, half - 6)
+            )
+        _draw_sparkline(
+            writer, tile["sparkline"], tile["colour"], x + pad, top - 112, inner, 17
+        )
+
+
 def render_pdf(
     analysis: AnalysisPayload,
     chart_png: Path | None,
@@ -1424,12 +1750,13 @@ def render_pdf(
     translator: i18n.Translator | None = None,
     *,
     table_key: Mapping[str, str] | None = None,
-) -> None:
-    """Write the strictly-one-page PDF, or raise ``ReportOverflow``.
+) -> int:
+    """Write the PDF, carrying every block the HTML report carries.
 
-    The layout cursor (``_Sheet``) is checked before every block, so a report
-    that cannot fit fails loudly instead of silently emitting a second page --
-    no output file is written at all in that case.
+    The layout cursor (``_Sheet``) closes the page and opens a fresh one
+    whenever the next block would cross the bottom margin, so a long report
+    simply runs onto page two -- nothing is dropped to make it fit, and the
+    attribution footer with its page number is printed on every sheet.
 
     Args:
         analysis: The ``analysis.json`` payload.
@@ -1440,29 +1767,61 @@ def render_pdf(
             decoding printed under the table. Absent means the English
             defaults, recorded as untranslated in a localised report.
 
+    Returns:
+        The number of pages written (always at least 1).
+
     Raises:
-        ReportOverflow: When any block would cross the bottom margin.
+        ReportOverflow: When a block cannot fit even on an empty page; no
+            complete PDF is produced in that case.
     """
     tr = translator or i18n.english()
     writer = pdf_canvas.Canvas(str(out_path), pagesize=letter)
     title = tr.t("report.title", topic=str(analysis["topic"]))
     writer.setTitle(title)
     writer.setAuthor("wikipedia-interest-analyzer")
-    sheet = _Sheet(writer)
 
-    # --- header: accent band with white title (replaces the thin rule) ------
-    # The band is decoration only: it wraps the same two blocks the old header
-    # printed, so the vertical budget grows only by its padding.
+    footer_text = footer_for(analysis, tr)
+
+    def draw_footer(page_number: int) -> None:
+        """Attribution plus page number, printed in the foot of every page."""
+        writer.setStrokeColor(RULE)
+        writer.setLineWidth(0.5)
+        writer.line(MARGIN, MARGIN - 12, PAGE_W - MARGIN, MARGIN - 12)
+        writer.setFont(FONT, 6.8)
+        writer.setFillColor(MUTED)
+        writer.drawString(MARGIN, MARGIN - 22, footer_text)
+        writer.drawRightString(PAGE_W - MARGIN, MARGIN - 22, str(page_number))
+
+    sheet = _Sheet(writer, draw_footer)
+
+    # --- masthead: accent band carrying kicker, title and subtitle ----------
+    # Same three blocks the HTML header prints, in the same order; the band
+    # is decoration, so the vertical budget grows only by its padding.
+    kicker = tr.t("report.kicker").upper()
     subtitle = subtitle_for(analysis, tr)
+    kicker_lines = wrap(kicker, FONT_BOLD, 7.5, CONTENT_W - 20)
     title_lines = wrap(title, FONT_BOLD, 17, CONTENT_W - 20)
     subtitle_lines = wrap(subtitle, FONT, 8, CONTENT_W - 20)
-    band_height = 8 + 21 * len(title_lines) + 11 * len(subtitle_lines) + 8
+    band_height = (
+        8
+        + 11 * len(kicker_lines)
+        + 5
+        + 21 * len(title_lines)
+        + 11 * len(subtitle_lines)
+        + 8
+    )
     sheet.need(band_height + 10, "header band")
     band_top = sheet.y + 6
     writer.setFillColor(ACCENT)
     band_bottom = band_top - band_height
     writer.rect(MARGIN, band_bottom, CONTENT_W, band_height, stroke=0, fill=1)
     cursor = band_top - 8
+    writer.setFont(FONT_BOLD, 7.5)
+    for line in kicker_lines:
+        cursor -= 11
+        writer.setFillColor(GOLD)
+        writer.drawString(MARGIN + 10, cursor, line)
+    cursor -= 5
     writer.setFont(FONT_BOLD, 17)
     for line in title_lines:
         cursor -= 21
@@ -1474,14 +1833,16 @@ def render_pdf(
         writer.setFillColor(SUBTITLE_ON_DARK)
         writer.drawString(MARGIN + 10, cursor, line)
     writer.setFillColor(GOLD)
-    writer.rect(MARGIN, band_top - band_height, CONTENT_W, 2, stroke=0, fill=1)
-    sheet.y = band_top - band_height - 10
+    writer.rect(MARGIN, band_bottom, CONTENT_W, 2, stroke=0, fill=1)
+    sheet.y = band_bottom - 10
 
     # --- verdict: dark panel, gold rule and tag ----------------------------
-    # ``headline`` already ends with the coverage-gap sentence when there are
-    # gaps (analyze.py appends it), so the PDF prints it exactly once -- the
-    # old second copy cost one-page space and read as a stutter.
+    # The HTML appends the coverage-gap sentence to the headline; the PDF
+    # prints the very same suffix so both artifacts read identically.
+    gap_suffix = gaps_note_text(analysis, tr)
     verdict = headline_for(analysis, tr)
+    if gap_suffix:
+        verdict = f"{verdict} {gap_suffix}"
     tag = tr.t("report.verdict_tag").upper()
     verdict_lines = wrap(verdict, FONT, 9.5, CONTENT_W - 22)
     tag_width = pdfmetrics.stringWidth(tag, FONT_BOLD, 7.0) + 12
@@ -1507,6 +1868,29 @@ def render_pdf(
         cursor -= 12.5
         writer.drawString(MARGIN + 11, cursor, line)
     sheet.y = box_top - box_height - 12
+
+    # --- KPI tiles ----------------------------------------------------------
+    # The cards the HTML grid shows, one row at a time: a long list of
+    # languages flows onto the next page instead of being squeezed or cut.
+    tiles = kpi_tiles_data(analysis, tr)
+    if tiles:
+        cols = _kpi_columns(len(tiles))
+        tile_w = (CONTENT_W - KPI_GAP * (cols - 1)) / cols
+        row_top = sheet.y
+        for index, tile in enumerate(tiles):
+            column = index % cols
+            if column == 0:
+                sheet.need(KPI_TILE_H, "kpi tiles")
+                row_top = sheet.y
+            _draw_kpi_tile(
+                writer,
+                tile,
+                MARGIN + column * (tile_w + KPI_GAP),
+                row_top - KPI_TILE_H,
+                tile_w,
+            )
+            if column == cols - 1 or index == len(tiles) - 1:
+                sheet.y = row_top - KPI_TILE_H - KPI_GAP
 
     # --- chart -------------------------------------------------------------
     if chart_png and chart_png.is_file():
@@ -1535,10 +1919,11 @@ def render_pdf(
         sheet.gap(4)
 
     # --- table -------------------------------------------------------------
+    # The column header repeats on every page the table spans: a row that
+    # starts a fresh sheet still has to say what its numbers mean.
     columns = table_columns_for(analysis)
     rows = table_rows_for(analysis, tr, columns=columns)
     row_height = 12.5
-    sheet.need(16 + row_height * len(rows) + 8, "comparison table")
 
     x_positions = []
     cursor_x = MARGIN
@@ -1546,23 +1931,29 @@ def render_pdf(
         x_positions.append(cursor_x)
         cursor_x += width
 
-    header_top = sheet.y
-    writer.setFillColor(ACCENT)
-    writer.rect(MARGIN, header_top - 16, CONTENT_W, 16, stroke=0, fill=1)
-    writer.setFont(FONT_BOLD, 7.8)
-    writer.setFillColor(WHITE)
-    for (name, width), x in zip(columns, x_positions, strict=True):
-        # A translated header can be longer than its fixed column: shorten it
-        # rather than let it collide with the neighbour it shares a row with.
-        value = fit(name, FONT_BOLD, 7.8, width - 8)
-        if name in ALIGN_LEFT:
-            writer.drawString(x + 4, header_top - 11.5, value)
-        else:
-            right = x + width - 4
-            writer.drawRightString(right, header_top - 11.5, value)
-    sheet.y = header_top - 16
+    def draw_table_header() -> None:
+        """Paint the header row, breaking a page first if it needs the room."""
+        sheet.need(16 + row_height, "comparison table header")
+        top = sheet.y
+        writer.setFillColor(ACCENT)
+        writer.rect(MARGIN, top - 16, CONTENT_W, 16, stroke=0, fill=1)
+        writer.setFont(FONT_BOLD, 7.8)
+        writer.setFillColor(WHITE)
+        for (name, width), x in zip(columns, x_positions, strict=True):
+            # A translated header can be longer than its fixed column: shorten it
+            # rather than let it collide with the neighbour it shares a row with.
+            value = fit(name, FONT_BOLD, 7.8, width - 8)
+            if name in ALIGN_LEFT:
+                writer.drawString(x + 4, top - 11.5, value)
+            else:
+                writer.drawRightString(x + width - 4, top - 11.5, value)
+        sheet.y = top - 16
+
+    draw_table_header()
 
     for index, row in enumerate(rows):
+        if sheet.y - row_height < BOTTOM:
+            draw_table_header()
         sheet.y -= row_height
         if row["gap"]:
             writer.setFillColor(GAP_ROW_BG)
@@ -1595,25 +1986,10 @@ def render_pdf(
     # below the grid, so a reader meets the decoding while the table is still
     # in view rather than down among the caveats. The ranking sentence leads,
     # because it explains the order of the rows still on screen.
-    # One muted line under the table: the ranking reason (it explains the
-    # rows) and the user's verdict in the same breath. Two blocks would cost
-    # a second line -- and a real layered study with a chart was short by
-    # points, not lines, when these printed separately.
     ranked_text = ranked_by_text(analysis, tr)
-    criteria_text = criteria_line(analysis, tr)
-    note_line = " ".join(
-        part for part in (ranked_text, criteria_text) if part
-    )
-    if note_line:
+    if ranked_text:
         sheet.gap(2)
-        sheet.text(
-            note_line,
-            FONT,
-            7.2,
-            9.4,
-            color=MUTED,
-            what="ranking/criteria note",
-        )
+        sheet.text(ranked_text, FONT, 7.2, 9.4, color=MUTED, what="ranking note")
     key_items = table_key_items(table_key, tr, columns=columns)
     if key_items:
         sheet.gap(2)
@@ -1635,6 +2011,50 @@ def render_pdf(
                 color=MUTED,
                 what="table key entry",
             )
+        sheet.gap(4)
+
+    # --- the user's own success criteria ------------------------------------
+    # The same block the HTML prints, in the same place: heading, one line
+    # per rule carrying every language's mark, then the n/m summaries. Both
+    # come from criteria_view(), so the two artifacts cannot grade a rule
+    # differently.
+    criteria = criteria_view(analysis, tr)
+    if criteria:
+        criteria_heading, rule_lines, criteria_summary = criteria
+        sheet.gap(4)
+        sheet.need(14, "criteria heading")
+        writer.setFillColor(GOLD)
+        writer.rect(MARGIN, sheet.y - 10, 3, 10, stroke=0, fill=1)
+        sheet.text(
+            criteria_heading.upper(),
+            FONT_BOLD,
+            8.5,
+            12,
+            color=ACCENT,
+            x=MARGIN + 9,
+            max_width=CONTENT_W - 9,
+            what="criteria heading",
+        )
+        for rule in rule_lines:
+            sheet.text(
+                "\u2022  " + rule,
+                FONT,
+                7.4,
+                9.6,
+                indent=10,
+                max_width=CONTENT_W,
+                what="criteria rule",
+            )
+        sheet.text(
+            criteria_summary,
+            FONT,
+            7.4,
+            9.6,
+            indent=10,
+            max_width=CONTENT_W,
+            color=MUTED,
+            what="criteria summary",
+        )
         sheet.gap(4)
 
     # --- assumptions & limitations ----------------------------------------
@@ -1680,17 +2100,13 @@ def render_pdf(
         )
 
     # --- footer ------------------------------------------------------------
-    sheet.gap(6)
-    writer.setStrokeColor(RULE)
-    writer.setLineWidth(0.5)
-    writer.line(MARGIN, sheet.y, PAGE_W - MARGIN, sheet.y)
-    sheet.gap(0)
-    sheet.text(
-        footer_for(analysis, tr), FONT, 6.8, 8.5, color=MUTED, what="footer"
-    )
+    # Pages closed by a page break already had theirs drawn (by _Sheet); this
+    # is the last one, and then the document is complete.
+    draw_footer(sheet.pages)
 
     writer.showPage()
     writer.save()
+    return sheet.pages
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1721,11 +2137,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Write the HTML report always, and the one-page PDF when it fits one page.
+    """Write the HTML report and a PDF carrying the same content.
+
+    The PDF is paginated, so length is no longer a failure -- ``1`` is
+    reserved for the one case printing cannot solve: a block that would not
+    fit on an empty page.
 
     Returns:
-        ``0`` on success; ``1`` when the PDF overflowed (the HTML is still
-        written and the partial PDF is deleted).
+        ``0`` on success; ``1`` when the PDF could not be printed (the HTML
+        is still written and the partial PDF is deleted).
     """
     common.configure_console()
     args = build_parser().parse_args(argv)
@@ -1750,7 +2170,7 @@ def main(argv: list[str] | None = None) -> int:
     pdf_path = Path(args.pdf)
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        render_pdf(analysis, chart, pdf_path, translator, table_key=table_key)
+        pages = render_pdf(analysis, chart, pdf_path, translator, table_key=table_key)
     except ReportOverflow as exc:
         print(f"error: {exc}", file=sys.stderr)
         print(
@@ -1761,7 +2181,7 @@ def main(argv: list[str] | None = None) -> int:
             pdf_path.unlink()
         status = 1
     else:
-        print(f"wrote {pdf_path} (1 page)")
+        print(f"wrote {pdf_path} ({pages} page{'s' if pages != 1 else ''})")
 
     # Printed on both paths: an untranslated report must be flagged even when
     # the PDF failed for an unrelated reason.

@@ -124,7 +124,7 @@ def test_the_note_names_at_most_five_missing_ids():
     note = translator.note()
 
     assert note is not None
-    assert "+3 more" in note, "the note must stay short enough for one page"
+    assert "+3 more" in note, "the note must stay short enough to read"
     assert note.count(",") <= 6
 
 

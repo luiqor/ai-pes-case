@@ -750,8 +750,7 @@ def build_assumptions() -> list[MessageRef]:
     """The two standing assumptions, as refs (fixed order, always present).
 
     NOTE: the growth definition lives in ``build_limitations``, not here --
-    stating it twice made the report print the same bullet twice and cost
-    one-page space.
+    stating it twice made the report print the same bullet twice.
     """
     return [
         {"id": "assumption.share"},
@@ -855,9 +854,9 @@ def build_limitations(
     if any(m.get("top_rank") for m in metrics.values()):
         layer_refs.append({"id": "limitation.layer_top"})
     if len(layer_refs) == 3:
-        # One line instead of three: these bullets share the strictly-one-page
-        # PDF's last points, and three separate ones pushed a real study over
-        # the edge by 1pt. The wording says exactly what was measured.
+        # One bullet for all three: the wording says exactly what was
+        # measured, and a reader gets one sentence instead of three
+        # near-identical ones to reconcile.
         limitations.append({"id": "limitation.layers_all"})
     else:
         limitations.extend(layer_refs)

@@ -1,15 +1,18 @@
-"""Report rendering: HTML content, the strict one-page PDF, and overflow safety.
+"""Report rendering: HTML content, the paginated PDF, and overflow safety.
 
-The one-page constraint is enforced by construction: layout advances an
-explicit cursor and every block reserves the space it needs *before* drawing.
-If the content cannot fit, ``ReportOverflow`` is raised and no PDF is written
--- a two-page report is never emitted silently.
+Both renderers are fed by the same builders, so this file checks two things:
+that the *content* matches (including in the PDF, whose text is extracted
+from the page streams), and that layout stays honest -- a long report
+paginates instead of being refused, while ``ReportOverflow`` still guards the
+one thing pagination cannot solve, a block too tall for an empty page.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import re
+import zlib
 from pathlib import Path
 
 import i18n
@@ -24,6 +27,81 @@ def _page_count(path) -> int:
     # is visible as /Type /Page -- but /Type /Pages (the tree node) must not
     # be counted, hence the word boundary.
     return len(re.findall(rb"/Type\s*/Page\b", data))
+
+
+def _flate(raw: bytes) -> bytes | None:
+    """Decode a stream reportlab stored as plain Flate, or say it cannot."""
+    try:
+        return zlib.decompress(raw)
+    except zlib.error:
+        return None
+
+
+def _inflate(raw: bytes) -> bytes | None:
+    """Decode one PDF stream, or say it is not one we can read.
+
+    reportlab frames page content as ASCII85 wrapped in Flate; embedded font
+    programs are plain Flate. Both are tried, and anything else is skipped --
+    a stream the decoder cannot open simply has no text to contribute.
+    """
+    try:
+        return zlib.decompress(base64.a85decode(raw, adobe=True))
+    except (ValueError, zlib.error):
+        return _flate(raw)
+
+
+def _pdf_text(path) -> str:
+    """The report's own words, pulled out of the PDF's content streams.
+
+    The strings between parentheses are the operands of the ``Tj``/``TJ``
+    operators that actually paint text; the embedded font programs are
+    streams too, so a stream only counts once it shows a text operator --
+    otherwise the result would be glyf data, not prose. Non-ASCII glyphs
+    (``✓``, ``▲``) come out as their subset-font byte values, but every
+    ASCII phrase -- headings, numbers, summaries -- arrives intact, which is
+    what the parity assertions need.
+    """
+    data = path.read_bytes()
+    pieces: list[str] = []
+    for stream in re.finditer(rb"stream\r?\n(.*?)endstream", data, re.S):
+        chunk = _inflate(stream.group(1))
+        if chunk is None or not re.search(rb"\)\s*T[Jj]", chunk):
+            continue
+        pieces.extend(
+            match.group(0)[1:-1].decode("latin-1")
+            for match in re.finditer(rb"\((?:\\.|[^\\()])*\)", chunk)
+        )
+    return " ".join(pieces)
+
+
+def _painted_sizes(path) -> list[list[float]]:
+    """The font size in force for every string painted, page by page.
+
+    A page's content stream opens with reportlab's own default
+    (``/F1 12 Tf``); every later ``Tj`` inherits whichever ``Tf`` was set
+    last. Tracking that the way a reader does shows which size the glyphs
+    really came out at, which is how a block drawn after a page break is
+    caught painting at 12pt instead of the size it asked for.
+    """
+    pages: list[list[float]] = []
+    for stream in re.finditer(rb"stream\r?\n(.*?)endstream", path.read_bytes(), re.S):
+        chunk = _inflate(stream.group(1))
+        if chunk is None or not re.search(rb"\)\s*T[Jj]", chunk):
+            continue
+        current = 12.0
+        sizes: list[float] = []
+        # Subset fonts are named like ``/F2+0``, so the name class carries
+        # the subset suffix characters as well as word characters.
+        for op in re.finditer(
+            r"/[+/=\w.]+\s+([\d.]+)\s+Tf|\((?:\\.|[^\\()])*\)\s*T[Jj]",
+            chunk.decode("latin-1"),
+        ):
+            if op.group(1) is not None:
+                current = float(op.group(1))
+            else:
+                sizes.append(current)
+        pages.append(sizes)
+    return pages
 
 
 # ------------------------------------------------------------------- HTML -----
@@ -183,7 +261,7 @@ def test_the_columns_add_up_to_the_content_width():
 def test_every_header_fits_the_column_it_prints_in():
     """Metric names are fixed codes, so they must fit the column they print in.
 
-    The columns are narrow on purpose -- that is the one-page budget -- and
+    The columns are narrow on purpose -- that is the fixed grid -- and
     nothing can be moved into a translation to shorten them, because metric
     names are never translated. If a header outgrows its column here, it
     outgrows it in every report.
@@ -203,7 +281,7 @@ def test_the_key_explains_the_abbreviated_columns_and_only_those():
     assert codes == ["Share/M", "YoY", "YoY share", "R²"]
     for _, definition in items:
         assert len(definition) > 20, "a definition must actually define"
-    # These read as their own definition and cost no one-page space.
+    # These read as their own definition and cost no wording.
     for plain in ("Lang", "Article", "Views"):
         assert plain not in codes
 
@@ -388,11 +466,11 @@ def test_pdf_is_exactly_one_letter_page(golden_analysis, tmp_path):
 
     assert out.is_file()
     assert out.stat().st_size > 4_000, "a suspiciously small PDF suggests failure"
-    assert _page_count(out) == 1, "reports are strictly one page"
+    assert _page_count(out) == 1, "a plain study still fits one page"
 
 
-def test_pdf_refuses_to_overflow_and_writes_nothing(golden_analysis, tmp_path):
-    """An overstuffed report must fail loudly rather than spill to page 2."""
+def test_a_bloated_report_paginates_instead_of_failing(golden_analysis, tmp_path):
+    """Length is not a failure any more: every caveat is printed, page by page."""
     bloated = dict(golden_analysis)
     # Distinct items: caveat_items() deliberately drops exact duplicates, so
     # repeating one string would no longer model an over-long report.
@@ -404,11 +482,122 @@ def test_pdf_refuses_to_overflow_and_writes_nothing(golden_analysis, tmp_path):
     ]
 
     out = tmp_path / "report.pdf"
+    pages = report_mod.render_pdf(bloated, None, out)
+
+    assert pages >= 2, "the report must continue rather than stop at one page"
+    assert _page_count(out) == pages, "the file must hold exactly what was drawn"
+    text = _pdf_text(out)
+    assert "Caveat 0" in text, "the first caveat must be printed"
+    assert "Caveat 14" in text, "the last caveat must survive the page breaks"
+
+
+def test_a_block_taller_than_a_page_is_refused_not_wrapped_around(
+    golden_analysis, tmp_path
+):
+    """The one case pagination cannot solve still raises, and writes nothing.
+
+    Prose flows line by line, so it never overflows -- but the verdict panel
+    is drawn as one box, and a verdict taller than a sheet has no honest way
+    to be printed.
+    """
+    bloated = dict(golden_analysis)
+    bloated["headline"] = "far too much text for one panel " * 400
+
+    out = tmp_path / "report.pdf"
     with pytest.raises(report_mod.ReportOverflow) as excinfo:
         report_mod.render_pdf(bloated, None, out)
 
-    assert "does not fit on one page" in str(excinfo.value)
+    assert "report cannot be printed" in str(excinfo.value)
+    assert "verdict box" in str(excinfo.value)
     assert not out.exists(), "no partial PDF may be left behind"
+
+
+def test_a_page_break_closes_the_previous_page_before_opening_a_new_one(
+    tmp_path,
+):
+    """``need`` breaks pages instead of overflowing, and counts them."""
+    from reportlab.pdfgen import canvas as pdf_canvas
+
+    writer = pdf_canvas.Canvas(str(tmp_path / "sheet.pdf"))
+    footed: list[int] = []
+    sheet = report_mod._Sheet(writer, footed.append)
+
+    assert sheet.need(10, "small") is False, "a block that fits must not break"
+    sheet.gap(report_mod.PAGE_H)  # push the cursor past the bottom margin
+    assert sheet.need(10, "next") is True, "an overhanging block must break"
+    assert sheet.pages == 2
+    assert footed == [1], "the closed page gets its footer before it is closed"
+    writer.save()
+
+
+def test_a_block_that_breaks_the_page_keeps_the_size_it_asked_for(tmp_path):
+    """Closing a sheet resets the canvas to Helvetica 12 -- the block must undo it.
+
+    Font and colour are set once per line, *after* ``need``, precisely
+    because a break throws that state away. Without it the line that starts
+    a fresh page comes out at 12pt and runs off the right edge.
+    """
+    from reportlab.pdfgen import canvas as pdf_canvas
+
+    path = tmp_path / "sheet.pdf"
+    writer = pdf_canvas.Canvas(str(path))
+    sheet = report_mod._Sheet(writer)
+    sheet.gap(report_mod.PAGE_H)  # cursor past the bottom margin: first line breaks
+    sheet.text(
+        "alpha bravo charlie delta " * 40,
+        report_mod.FONT,
+        7.2,
+        9.4,
+        what="spill",
+    )
+    writer.showPage()
+    writer.save()
+
+    assert sheet.pages == 2, "the block must have continued on a fresh sheet"
+    painted = _painted_sizes(path)
+    assert painted, "the block's lines must be in the file at all"
+    for page_sizes in painted:
+        assert page_sizes, "a page that paints text must record its sizes"
+        assert set(page_sizes) == {7.2}, (
+            "every line is drawn at the size the block asked for, "
+            f"not the canvas default; got {sorted(set(page_sizes))}"
+        )
+
+
+def test_the_pdf_carries_every_block_the_html_carries(golden_analysis, tmp_path):
+    """Parity is the contract: what the HTML says, the PDF says too.
+
+    The two artifacts used to drift -- the HTML gained a criteria block and
+    KPI tiles that the PDF used to have no room for. This pins the blocks
+    that used to be missing, on both sides of the same render.
+    """
+    _with_criteria(golden_analysis)
+    html_path = tmp_path / "report.html"
+    pdf_path = tmp_path / "report.pdf"
+
+    report_mod.render_html(golden_analysis, None, html_path)
+    pages = report_mod.render_pdf(golden_analysis, None, pdf_path)
+
+    html = html_path.read_text(encoding="utf-8")
+    text = _pdf_text(pdf_path)
+    assert pages >= 1
+    for marker in (
+        "Wikipedia interest report",  # kicker
+        '<section class="kpis">',  # KPI tiles
+        'class="criteria"',  # success criteria
+        "Assumptions",  # caveats
+    ):
+        assert marker in html, f"HTML lost {marker}"
+    for marker in (
+        "WIKIPEDIA INTEREST REPORT",  # kicker (uppercased, as the CSS does)
+        "YOY SHARE",  # the KPI hero label
+        "TOTAL VIEWS",  # a KPI supporting count
+        "YOUR CRITERIA",  # the criteria heading
+        "ASSUMPTIONS & LIMITATIONS",  # caveats heading
+        "pl 1/2 met, cs 1/2 met",  # the criteria verdict
+        "38,863",  # a number that only exists in metrics, not in prose
+    ):
+        assert marker in text, f"PDF lost {marker}"
 
 
 def test_gap_report_also_fits_on_one_page(gap_analysis, tmp_path):
@@ -430,7 +619,7 @@ def test_caveat_items_put_warnings_first_and_drop_duplicates(golden_analysis):
     items = report_mod.caveat_items(analysis)
 
     assert items[0] == "Warning: window of 44 months ... capped at medium"
-    assert items.count("same bullet") == 1, "duplicates cost one-page space"
+    assert items.count("same bullet") == 1, "a caveat stated twice says it twice"
     assert items.index("other") < items.index("another")
 
 
@@ -741,7 +930,7 @@ def test_every_layer_combination_fills_the_page_and_fits_its_headers(
 ):
     """Extra columns may never widen the grid or truncate a header.
 
-    The one-page budget is the whole design: the columns re-fit to the page
+    The fixed grid is the whole design: the columns re-fit to the page
     width by giving up room in proportion to their slack, and no header is
     allowed to be shortened away from its own name.
     """
@@ -811,7 +1000,7 @@ def test_a_gap_row_stays_a_dash_in_every_layer_column(gap_analysis):
 
 
 def test_the_key_explains_only_the_columns_that_are_printed(golden_analysis):
-    """An unprinted layer column costs no one-page space and says nothing."""
+    """An unprinted layer column costs no wording and says nothing."""
     base = report_mod.table_key_items()
     assert [code for code, _ in base] == ["Share/M", "YoY", "YoY share", "R\u00b2"]
 
@@ -917,18 +1106,14 @@ def test_gap_rows_trail_the_ranked_languages(gap_analysis):
     assert [(row["Lang"], row["gap"]) for row in rows] == [("cs", ""), ("pl", "gap")]
 
 
-def test_the_full_layered_payload_still_fits_one_page(golden_analysis, tmp_path):
-    """Metrics are not the whole cost: the layer *wording* must fit too.
+def test_the_full_layered_payload_is_printed_in_full(golden_analysis, tmp_path):
+    """Everything a real study carries must reach the PDF, however long it is.
 
-    `analyze.py` appends one limitation per measured layer and the report
-    prints its ranking sentence, and a real run also embeds the chart -- all
-    three eat the one-page budget together. Rendering the metrics alone with
-    no chart (as an earlier version of this test did) hid a PDF that
-    overflowed by a point in actual use.
-
-    The user's success criteria are part of that real study too: their line
-    costs its own points, so it is added here rather than in a toy test
-    that would fit anything.
+    `analyze.py` appends one limitation per measured layer, the report prints
+    a ranking sentence, a real run embeds the chart, and the user's success
+    criteria add their own block -- together these no longer fit one page, so
+    the point of the test is that *nothing is dropped*: the whole caveat list
+    and the criteria verdict are still on paper, however many pages that takes.
     """
     import chart as chart_mod
 
@@ -945,9 +1130,15 @@ def test_the_full_layered_payload_still_fits_one_page(golden_analysis, tmp_path)
     chart_png = Path(chart_mod.render(golden_analysis, tmp_path / "chart")["png"])
     out = tmp_path / "report.pdf"
 
-    report_mod.render_pdf(golden_analysis, chart_png, out)
+    pages = report_mod.render_pdf(golden_analysis, chart_png, out)
 
-    assert _page_count(out) == 1
+    assert pages >= 1
+    assert _page_count(out) == pages
+    text = _pdf_text(out)
+    assert "YOUR CRITERIA" in text, "the user's rules must be in the PDF"
+    assert "share of edition reading" in text, "so must each rule"
+    assert "pl 1/2 met, cs 1/2 met" in text, "and their verdict"
+    assert "Ranked by human traffic" in text, "the ranking note travels too"
 
 
 # ------------------------------------------------------- success criteria ---
@@ -990,23 +1181,39 @@ def test_without_success_rules_no_criteria_block_is_printed(
     report_mod.render_html(golden_analysis, None, out)
 
     assert 'class="criteria"' not in out.read_text(encoding="utf-8")
-    assert report_mod.criteria_line(golden_analysis) == ""
+    assert report_mod.criteria_view(golden_analysis) is None
     assert report_mod.criteria_block_html(golden_analysis) == ""
 
 
-def test_the_pdf_prints_exactly_one_line_of_criteria(golden_analysis, tmp_path):
-    """The one-page budget buys one line, not the HTML's full block."""
+def test_the_pdf_prints_the_whole_criteria_block(golden_analysis, tmp_path):
+    """The PDF carries the breakdown the HTML does -- heading, rules, summary."""
     _with_criteria(golden_analysis)
     out = tmp_path / "report.pdf"
 
-    assert (
-        report_mod.criteria_line(golden_analysis, i18n.english())
-        == "Your criteria: pl 1/2 met, cs 1/2 met"
+    heading, rules, summary = report_mod.criteria_view(
+        golden_analysis, i18n.english()
     )
+    assert heading == "Your criteria"
+    assert rules == [
+        "share of edition reading (per million) >= 50: pl \u2713, cs \u2717",
+        "share growth (second half vs first) > 0: pl \u2717, cs \u2713",
+    ]
+    assert summary == "pl 1/2 met, cs 1/2 met"
 
     report_mod.render_pdf(golden_analysis, None, out)
 
-    assert _page_count(out) == 1
+    assert _page_count(out) >= 1
+    text = _pdf_text(out)
+    # The heading is uppercased, exactly as the HTML template's CSS does.
+    assert "YOUR CRITERIA" in text, "the heading must reach the PDF"
+    assert "share of edition reading" in text, "and so must the rule lines"
+    assert "pl 1/2 met, cs 1/2 met" in text, "and the summaries"
+    # Both renderers draw the same strings, so the HTML cannot grade better.
+    html = tmp_path / "report.html"
+    report_mod.render_html(golden_analysis, None, html)
+    assert "share of edition reading (per million) &gt;= 50: pl \u2713, cs \u2717" in (
+        html.read_text(encoding="utf-8")
+    )
 
 
 def test_a_gap_language_reads_as_not_measurable_not_as_a_zero(
@@ -1030,9 +1237,11 @@ def test_a_gap_language_reads_as_not_measurable_not_as_a_zero(
     }
     out = tmp_path / "report.html"
 
-    assert report_mod.criteria_line(gap_analysis, i18n.english()) == (
-        "Your criteria: cs 0/1 met, pl not measurable (no article)"
-    )
+    _, rules, summary = report_mod.criteria_view(gap_analysis, i18n.english())
+    assert summary == "cs 0/1 met, pl not measurable (no article)"
+    assert rules == [
+        "share of edition reading (per million) >= 50: cs \u2717, pl \u2014"
+    ]
 
     report_mod.render_html(gap_analysis, None, out)
     html = out.read_text(encoding="utf-8")

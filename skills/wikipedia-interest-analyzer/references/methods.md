@@ -250,13 +250,11 @@ would hide that we do not know.
 * `analysis.json` → the `criteria` block, **only when the manifest asked for
   one**: a study without `success` keeps exactly the payload shape it always
   had (pinned by test).
-* HTML → a "Your criteria" block under the table: one line per rule with
-  each language's mark (`✓`/`✗`/`—`), then the `n/m` summaries.
-* PDF → **one line**, merged with the ranking note when both exist
-  (`Ranked by … Your criteria: pl 2/3 met, cs 1/3 met`): the verdict the
-  reader needs, while the full breakdown stays in `analysis.json` and the
-  HTML — two separate lines cost points the strictly-one-page PDF does not
-  have in a real layered study.
+* Report → HTML **and** PDF both print a "Your criteria" block under the
+  table: heading, one line per rule with each language's mark
+  (`✓`/`✗`/`—`), then the `n/m` summaries. Both are built from one function
+  (`report.criteria_view`), so the two artifacts cannot grade a rule
+  differently, and the PDF paginates rather than shortening the block.
 * `run.py status` → `criteria: N success rule(s)` at review time.
 
 Design decisions: the metric list is closed because a rule that could

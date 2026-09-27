@@ -307,7 +307,7 @@ def stage_report(
     *,
     table_key: dict[str, str] | None = None,
 ) -> None:
-    """Write ``report.html`` always and ``report.pdf`` when it fits one page.
+    """Write ``report.html`` and ``report.pdf`` with the same content.
 
     Args:
         analysis: The ``analysis.json`` payload.
@@ -317,8 +317,10 @@ def stage_report(
             translated) decoding printed under the comparison table.
 
     Raises:
-        SystemExit: Code 1 when the PDF would overflow: the HTML is kept,
-            the partial PDF is deleted, and the reason is printed.
+        SystemExit: Code 1 only when a block cannot be printed at all (it
+            would not fit an empty page): the HTML is kept, the partial PDF
+            is deleted, and the reason is printed. Length alone is not a
+            failure -- the PDF paginates.
     """
     chart_png = out_dir / "chart.png"
     html_path = out_dir / "report.html"
@@ -332,7 +334,7 @@ def stage_report(
     )
     print(f"  wrote {html_path}")
     try:
-        report_mod.render_pdf(
+        pages = report_mod.render_pdf(
             analysis,
             chart_png if chart_png.is_file() else None,
             pdf_path,
@@ -345,7 +347,7 @@ def stage_report(
         if pdf_path.exists():
             pdf_path.unlink()
         raise SystemExit(1) from exc
-    print(f"  wrote {pdf_path} (1 page)")
+    print(f"  wrote {pdf_path} ({pages} page{'s' if pages != 1 else ''})")
 
 
 # --------------------------------------------------------------------------

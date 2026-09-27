@@ -506,8 +506,8 @@ def test_layer_limitations_are_added_only_for_measured_layers(
         top_rank={"month": "2026-08", "rank": None, "list_size": 1000},
     )
     everything = " ".join(analyze_mod.analyze(all_layers)["limitations"])
-    # All three measured at once cost ONE line: three bullets pushed a real
-    # one-page PDF over the edge (see tests/test_report.py).
+    # All three measured at once cost ONE bullet: three near-identical
+    # sentences would make the reader reconcile them (see report.py).
     assert everything.count("measured here") == 1
     assert "Device split" in everything and "top rank" in everything
 

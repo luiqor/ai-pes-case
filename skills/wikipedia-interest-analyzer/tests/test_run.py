@@ -2,8 +2,8 @@
 
 These are the tests that make the skill safe to hand to a cheap model: they
 prove a bare `run.py all` produces every artifact, that a gap is reported
-rather than filled, and that a report which cannot fit one page exits non-zero
-instead of emitting a two-page PDF.
+rather than filled, that a long report paginates instead of failing, and that
+the one thing pagination cannot print still exits non-zero.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from pathlib import Path
 import common
 import i18n
 import pytest
+import report as report_mod
 import run as run_mod
 from helpers import full_translation
 
@@ -195,7 +196,10 @@ def test_unresolvable_stage_fails_with_a_clear_message(tmp_path):
     )
 
 
-def test_report_stage_exits_non_zero_when_the_pdf_cannot_fit(tmp_path, golden_analysis):
+def test_report_stage_prints_a_long_report_over_several_pages(
+    tmp_path, golden_analysis
+):
+    """Length is not an error: the report stage paginates and says so."""
     out = tmp_path / "out"
     out.mkdir()
     study = tmp_path / "study.json"
@@ -213,7 +217,35 @@ def test_report_stage_exits_non_zero_when_the_pdf_cannot_fit(tmp_path, golden_an
         ["all", "--stage", "report", "--study", str(study), "--out", str(out)]
     )
 
-    assert rc == 1, "an over-long report must fail, not silently use two pages"
+    assert rc == 0
+    assert (out / "report.html").is_file()
+    assert (out / "report.pdf").is_file(), "the PDF must be produced, not refused"
+    pdf = (out / "report.pdf").read_bytes()
+    assert len(re.findall(rb"/Type\s*/Page\b", pdf)) >= 2
+
+
+def test_report_stage_still_fails_when_a_block_cannot_be_printed(
+    tmp_path, monkeypatch, golden_analysis
+):
+    """The exit-1 path survives: an unprintable block stops the stage."""
+    out = tmp_path / "out"
+    out.mkdir()
+    study = tmp_path / "study.json"
+    common.write_json(
+        study, {"topic": "intermittent fasting", "languages": ["pl", "cs"]}
+    )
+    common.write_json(out / "analysis.json", golden_analysis)
+
+    def explode(*args, **kwargs):
+        raise report_mod.ReportOverflow("report cannot be printed: 'verdict box'")
+
+    monkeypatch.setattr(report_mod, "render_pdf", explode)
+
+    rc = run_mod.main(
+        ["all", "--stage", "report", "--study", str(study), "--out", str(out)]
+    )
+
+    assert rc == 1, "an unprintable report must fail loudly"
     assert (out / "report.html").is_file(), "HTML has no page limit"
     assert not (out / "report.pdf").exists()
 

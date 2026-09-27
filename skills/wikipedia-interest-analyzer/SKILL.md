@@ -1,6 +1,6 @@
 ---
 name: wikipedia-interest-analyzer
-description: Measures how reader interest in a topic changes over time across Wikipedia language editions using Wikimedia pageview data, then renders a comparison chart and a strictly one-page PDF/HTML report with an explicit confidence grade, assumptions and limitations. Use when someone asks which topics or languages to invest in, whether interest in a topic is growing or declining in a given language edition, how confident a trend is, which audience to investigate next, or wants a shareable report comparing audiences — for example "compare interest in intermittent fasting in the Polish and Czech Wikipedias over the past two years".
+description: Measures how reader interest in a topic changes over time across Wikipedia language editions using Wikimedia pageview data, then renders a comparison chart and a paginated PDF/HTML report with an explicit confidence grade, assumptions and limitations. Use when someone asks which topics or languages to invest in, whether interest in a topic is growing or declining in a given language edition, how confident a trend is, which audience to investigate next, or wants a shareable report comparing audiences — for example "compare interest in intermittent fasting in the Polish and Czech Wikipedias over the past two years".
 compatibility: Requires Python 3.12+, uv, and network access to wikimedia.org, *.wikipedia.org and wikidata.org. Charts and the PDF are produced locally (matplotlib, reportlab); no API key needed.
 metadata:
   version: "1.0"
@@ -13,7 +13,8 @@ Turns a natural-language topic plus a list of language editions into a
 data-grounded answer: **is interest in this topic growing here, and how much
 should we trust that?** It fetches Wikimedia pageview data, normalises it
 against each edition's total traffic, computes trend and seasonality statistics,
-draws a chart and emits a one-page report.
+draws a chart and emits a report — an HTML file and a PDF that paginate, so
+both carry the same content block for block.
 
 It is deliberately sceptical of its own output. Every report carries a
 confidence grade with the reasons behind it, plus its assumptions and
@@ -183,7 +184,7 @@ Outputs land in `--out` (default: the current directory):
 |---|---|
 | `analysis.json` | **Read this first.** Headline, per-language metrics, comparison, assumptions, limitations |
 | `series.json` | Raw aligned monthly series |
-| `report.pdf` | Strictly one page — the shareable artifact |
+| `report.pdf` | The shareable artifact — every block the HTML carries, flowed over as many pages as it needs |
 | `report.html` | Same content, self-contained (chart embedded), no page limit |
 | `chart.png` / `chart.svg` | Two panels: absolute views, normalised share |
 | `translations.<lang>.json` | Report/chart strings for `--report-lang`; written (English) on first use, translated in place |
@@ -300,8 +301,9 @@ every turn.
 
 Where the verdict lands: `analysis.json` → `criteria.verdicts.<lang>.<id>`
 (`{value, passed}`) plus `criteria.summary.<lang>` (`{met, total,
-not_evaluable}`); the report shows a "Your criteria" block in the HTML and
-**one line** in the PDF (`Your criteria: pl 2/3 met, cs 1/3 met`).
+not_evaluable}`); the report shows a "Your criteria" block — heading, one line
+per rule with each language's mark, then the `n/m` summaries — in **both** the
+HTML and the PDF.
 `passed: null` *with a `reason`* means the rule could not be measured — a
 coverage gap, a layer that was not fetched, an unavailable growth window —
 and is never a failure. The manifest refuses a layer-bound rule without its
@@ -313,8 +315,8 @@ answer. Never re-apply the thresholds yourself: the code's verdict is the
 one to report. Editing a rule only needs another `all` — the fetch layer is
 cached.
 
-Notes: only columns whose metric was measured are printed — KPI tiles,
-confidence grades and the one-page budget are unchanged. Each layer costs
+Notes: only columns whose metric was measured are printed — KPI tiles and
+confidence grades are unchanged. Each layer costs
 extra requests (3 / 1 / 1 per language for `access` / `bot` / `top`), so add
 them when the question needs them. When you enable a layer, add its header to
 the `table_key` block too (`Mobile %`, `Bot %`, `Rank`) — an entry the table
@@ -385,8 +387,10 @@ with the same `--study`/`--out`:
 3. **Never report a title you have not confirmed** with `prop=info`.
 4. **Never claim a trend the data does not support.** Quote `confidence` and its
    reasons; state assumptions and limitations in the reply.
-5. **Reports stay one page.** If the PDF cannot fit, it fails with a non-zero
-   exit and writes *only* the HTML — it will not emit a two-page PDF.
+5. **The PDF carries everything the HTML does.** Both are rendered from the
+   same blocks, so the PDF paginates rather than dropping content; length
+   only fails (non-zero exit, HTML kept, PDF not written) when a single block
+   cannot fit an empty page.
 6. **Stay polite to the API.** Sequential requests, fixed delay, backoff on
    429/5xx, and a `User-Agent` on every call — Wikimedia requires one and the
    skill always sends it (set `WIA_USER_AGENT` to add your contact details).
@@ -414,7 +418,7 @@ with the same `--study`/`--out`:
 | `pl: GAP` | genuinely no article → **ask the user** to pick a candidate or confirm the gap (step 3); never choose yourself |
 | report/answer in English although the prompt wasn't | `--report-lang` was omitted — set it in `init` (or `"report_language"` in `study.json`), translate `translations.<code>.json`, rerun |
 | `N requested month(s) not loaded yet` | trailing months absent from the project series; the window was trimmed and the warning says so |
-| `report does not fit on one page` | too much text/languages; split the study or shorten the verdict — HTML was still written |
+| `report cannot be printed: '…' needs …` | one block is taller than a whole page (e.g. an enormous headline); shorten it — the HTML was still written. A merely *long* report is fine: the PDF just uses more pages |
 | `HTTP 404 … invalid route` | a malformed path (client bug), not missing data |
 | `no data for those date(s)` | valid request, nothing in that range; check the window is after 2015-07 |
 | `series.json not found -- run 'run.py all --stage fetch' first` | stages are ordered; run the earlier one (or just `all`) |
@@ -448,6 +452,7 @@ with the same `--study`/`--out`:
 * Optional data layers (`access`, `bot`, `top`), `criteria.rank_by` and
   `criteria.success` add table columns, a stated ranking order and a graded
   verdict against the user's own thresholds — never new KPI tiles, never a
-  different confidence grade, never a second page.
+  different confidence grade; a long report spans more pages instead of
+  losing any of them.
 * Multi-article topic clusters, daily granularity and larger date ranges are
   planned extensions rather than supported features.

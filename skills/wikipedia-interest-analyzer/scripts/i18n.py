@@ -179,8 +179,8 @@ MESSAGES: dict[str, str] = {
         "{lang} peaks in calendar month {month} ({ratio}x the overall mean)"
     ),
     # --- analysis: optional data layers -------------------------------------
-    # One line each on the PDF: these sit in the one-page budget's limitations
-    # block, and a second line here is a page the report no longer has.
+    # One line each: each of these describes exactly one layer, so the
+    # caveat list stays scannable in either renderer.
     "limitation.layer_access": (
         "Device split measured here: desktop + mobile-web + mobile-app sum to "
         "the all-access total."
@@ -193,8 +193,8 @@ MESSAGES: dict[str, str] = {
         "Top rank is the placement in the project's monthly top list at the "
         "window's end; >N means not listed."
     ),
-    # All three measured at once: one line instead of three. Separate bullets
-    # cost ~19pt the strictly-one-page PDF did not have in a real study.
+    # All three measured at once: one bullet instead of three near-identical
+    # ones, in exactly one sentence.
     "limitation.layers_all": (
         "Device split, bot share and top rank measured here: the sums behind "
         "them are exact, >N = outside the top list."
@@ -215,7 +215,6 @@ MESSAGES: dict[str, str] = {
     "criteria.lang_summary": "{lang} {met}/{total} met",
     "criteria.lang_summary_na": "{lang} {met}/{total} met ({na} not measurable)",
     "criteria.lang_gap": "{lang} not measurable (no article)",
-    "criteria.line": "Your criteria: {summaries}",
     # metric names for criteria.success rules without a manifest "label"
     "metric.share_ppm": "share of edition reading (per million)",
     "metric.article_total": "total article views in the window",
