@@ -113,7 +113,9 @@ Q1666254, which has a Czech sitelink but no Polish one).
 **Handling, in order of preference:**
 
 1. Report the gap and offer **candidate** articles from that edition's own search,
-   already filtered to pages that exist. Candidates are data, not decisions.
+   already filtered to pages that exist. Candidates are data, not decisions —
+   the agent **stops and asks the user** (candidate or skip) before any
+   pageviews are fetched (SKILL.md step 3).
 2. If a human picks one, they must say so explicitly:
    `run.py override --lang pl --title "Post"`.
 3. The substitution is then disclosed everywhere it matters — the headline

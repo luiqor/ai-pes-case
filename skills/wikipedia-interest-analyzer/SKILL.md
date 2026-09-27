@@ -20,12 +20,35 @@ confidence grade with the reasons behind it, plus its assumptions and
 limitations. **A coverage gap is reported as a gap — never quietly replaced by a
 similar article.**
 
+## Step 0 — language, before anything else
+
+Do this **first**, before `init`, before any other command:
+
+1. **Detect the language the user prompted in.** That language is the default
+   for *everything* you produce: the report (`report.pdf` / `report.html`), the
+   chart labels, **and your answer in the chat**.
+2. Pass it on the very first command:
+   `run.py init … --report-lang <code>` (`uk` → `--report-lang uk`).
+   English only when the prompt is English, or when the user explicitly asks
+   for English. **Never fall back to English because it is the default.**
+3. The first run in that language writes `<out>/translations.<code>.json` with
+   the **English** messages and renders this run in English as a placeholder.
+   You then **translate every value yourself** and rerun `all` with the same
+   `--report-lang`. **Do not show the user a placeholder/English report** when
+   they prompted in another language.
+
+Before running `all`, check the manifest: `status` must print
+`report: <code>` in the user's language. If the line is missing or says `en`
+while the prompt was in another language, fix it **before** fetching anything —
+pass `--report-lang <code>` to `init` (with `--force`, before `resolve`) or add
+`"report_language": "<code>"` to `study.json`.
+
 ## Setup (once)
 
 ```bash
 cd skills/wikipedia-interest-analyzer
 uv sync                      # installs pinned deps from uv.lock
-uv run pytest                # optional: 246 offline tests, ~10s
+uv run pytest                # optional: 250 offline tests, ~20s
 ```
 
 **Treat the skill directory as read-only.** Every command takes `--study` (the
@@ -59,16 +82,17 @@ export WIA_USER_AGENT="your-name/1.0 (you@example.com) requests"     # bash / zs
 ### 1. Create a study
 
 ```bash
-uv run python scripts/run.py init --topic "intermittent fasting" --langs pl,cs --study "$WORK/study.json"
+uv run python scripts/run.py init --topic "intermittent fasting" --langs pl,cs --report-lang pl --study "$WORK/study.json"
 ```
+
+`--report-lang` is **not optional**: pass the language of the user's prompt
+(see [Step 0](#step-0--language-before-anything-else)); it is stored in the
+manifest and reused by every rerun. Omit it only when the prompt itself is in
+English.
 
 Optional `--since 2024-10 --until 2026-08` fixes the window (default: the last
 24 complete months — `init` prints the resolved dates, not `(default)`). This
 writes a small manifest you can edit later instead of re-querying.
-
-Optional `--report-lang pl` sets the report/chart language once for every
-rerun (see [Report language](#report-language) — unless the user asks
-otherwise, use the language they prompted in).
 
 ### 2. Resolve the topic, then review it before fetching
 
@@ -89,24 +113,61 @@ Read the output carefully:
   wrong item was picked, re-run `resolve --qid Q…`;
 * `cs: Přerušovaný půst` — a real article was found;
 * `pl: GAP` — that edition has **no article**, and candidate articles are
-  listed underneath for *you* to judge;
+  listed underneath. That list is for the **user**, not for you — see step 3;
 * `window: 2024-10 .. 2026-08` — the dates actually used.
 
-### 3. Fill gaps explicitly (only if you decide to)
+### 3. Any GAP → stop and ask the user (mandatory)
+
+If `resolve`/`status` prints a `GAP`, **do not continue to step 5 before the
+user has answered**. Ask in the user's language (step 0), listing the
+candidates exactly as `status` printed them:
+
+> У **pl**-вікіпедії немає статті «intermittent fasting». Що робимо?
+>
+> 1. `Głodówka lecznicza` — *„FJ.F. Trepanowski … Intermittent fasting
+>    combined with calorie restriction is effective for weight loss…"*
+> 2. `Stres oksydacyjny` — *„…produced by caloric restriction, intermittent
+>    fasting, exercise…"*
+> 3. Пропустити **pl** — тоді у звіті буде «no article exists / not
+>    measurable» для цієї мови.
+> 4. Змінити тему/список мов.
+
+Rules for the question:
+
+* **Copy** titles and snippets from `status` — never invent one; a plausible
+  misspelling in `override` looks like zero interest.
+* If the user picks a candidate → step 4. If they pick "skip" → leave the gap
+  (or drop the language from `study.json`); the report will say
+  `pl | no article exists | not measurable`.
+* **Only if the user cannot be asked** (no way to reply, or they already said
+  "don't ask, just run it") may you continue with the pure gap — and say so in
+  your answer. Never pick a candidate yourself.
+* The same applies to a wrong concept: if `hits:` shows an obviously better
+  Q-item, ask before resolving (`resolve --qid Q…`).
+
+### 4. Fill the gap only after the user chose
 
 ```bash
 uv run python scripts/run.py override --lang pl --title "Post" --study "$WORK/study.json"
 ```
 
-This is the **only** way a substitute gets used, and it must be your decision.
+This is the **only** way a substitute gets used, and the choice must be the
+**user's** (step 3), never yours.
 It is then disclosed in the headline, the limitations and `analysis.json`
 (`resolved_via: override`, `native_gap: true`). Never invent a title — copy it
 from `status` output; a plausible misspelling looks like zero interest.
 
-If you prefer a pure gap, skip this step. The report will show
+If the user prefers a pure gap, skip this step. The report will show
 `pl | no article exists | not measurable`.
 
-### 4. Run everything
+### 5. Run everything
+
+Before this command, all of these must be true:
+
+- `status` prints `report: <the user's language>` **and**
+  `translations.<code>.json` is translated by you (step 0);
+- every `GAP` was put to the user and answered (step 3) — no silent skips;
+- `table_key` is written into `study.json`, in the report's language.
 
 ```bash
 uv run python scripts/run.py all --study "$WORK/study.json" --out "$WORK"
@@ -129,19 +190,24 @@ Outputs land in `--out` (default: the current directory):
 
 ### Report language
 
-The report and the chart are written in the language the user prompted in —
-unless they ask for another one. Pick the code yourself (`pl`, `cs`, `de`,
+Everything the user reads — the report, the chart **and your answer in the
+chat** — is written in the language of their prompt, unless they ask for
+another one. Pick the code yourself (`pl`, `uk`, `cs`, `de`,
 `fr`, `pt-br`, … any language the agent can translate into); the skill ships
-**no** translation catalogue, you supply the wording.
+**no** translation catalogue, you supply the wording. See
+[Step 0](#step-0--language-before-anything-else).
 
 1. Pass the code: `run.py init … --report-lang pl` (stored in the manifest)
    or per run: `run.py all … --report-lang pl`. Either way the report, the
-   PDF and every chart label use it.
+   PDF and every chart label use it. **Do not omit it** — an omitted code
+   means English.
 2. The first such run finds no translations and **writes
    `<out>/translations.pl.json`** — the English messages keyed by id — then
-   renders this run in English with a visible note. Translate every value in
+   renders this run in English with a visible note. **That run is a
+   placeholder: translate before you show anything to the user.** Translate
+   every value in
    `"messages"` (keep the ids and the `{placeholder}` names exactly as they
-   are). Optionally pre-write it with
+   are), then rerun (point 3). Optionally pre-write it with
    `run.py i18n-template --lang pl --out <path>` (`--force` to overwrite).
 3. Rerun with the same flag. Missing ids fall back to English — the report
    then carries a visible `Warning (pl): Untranslated text: …` note naming
@@ -224,7 +290,7 @@ with the same `--study`/`--out`:
 | Different concept | re-run `init --force --study …`, or pass `--qid Q…` to `resolve`/`all` |
 | Report in another language | `run.py all --report-lang <code> …` (or `init --report-lang`); translate the new `translations.<code>.json` |
 | Explain the table differently | `study.json` → `"table_key"` block (`"heading"` plus one entry per abbreviated column); printed verbatim as the key under the table |
-| Try a substitute | `run.py override --lang … --title … --study …` |
+| Try a substitute | **ask first (step 3)**, then `run.py override --lang … --title … --study …` |
 | Force fresh data | `run.py all --no-cache --study … --out …` |
 
 ## Rules
@@ -232,8 +298,10 @@ with the same `--study`/`--out`:
 1. **Never hand-write a pageviews URL.** Title encoding and URL building live in
    exactly one place, `scripts/api.py` (re-exported as `common.*`). Everything goes through
    `common.per_article_url` / `common.aggregate_url` / `common.action_api`.
-2. **Never substitute an article automatically.** Report the gap; if the user
-   picks a candidate, use `override` so it is recorded and disclosed.
+2. **Never substitute an article automatically — and never skip one silently.**
+   A `GAP` stops the workflow: **ask the user** with the candidates from
+   `status` (step 3). Only their answer leads to `override` (recorded and
+   disclosed) or to a documented gap.
 3. **Never report a title you have not confirmed** with `prop=info`.
 4. **Never claim a trend the data does not support.** Quote `confidence` and its
    reasons; state assumptions and limitations in the reply.
@@ -243,9 +311,13 @@ with the same `--study`/`--out`:
    429/5xx, and a `User-Agent` on every call — Wikimedia requires one and the
    skill always sends it (set `WIA_USER_AGENT` to add your contact details).
    The numeric rate limit was never probed.
-7. **Write the report in the user's language** (see
-   [Report language](#report-language)); translate via
-   `translations.<lang>.json`, never by editing templates or shipped code.
+7. **Write in the user's prompt language** — the report, the chart labels
+   **and your answer in the chat** (see [Step 0](#step-0--language-before-anything-else)
+   and [Report language](#report-language)). Pass `--report-lang` to `init`;
+   English is the answer only for an English prompt. Translate via
+   `translations.<lang>.json`, never by editing templates or shipped code, and
+   translate it **before** you show the user the report — an English report for
+   a non-English prompt is a bug, not a fallback.
    Anything untranslated falls back to English *with a visible note* —
    partial output is admitted, never hidden. Data files and console wording
    stay English. Table headers stay English codes too: their wording lives in
@@ -259,7 +331,8 @@ with the same `--study`/`--out`:
 | `study manifest not found` | run `init --study …` first |
 | `study has no resolution yet` | run `resolve --study …` first (a real subcommand; `all --stage resolve` works too) |
 | `… article '…' does not exist` | typo in `override`; copy the title from `status` |
-| `pl: GAP` | genuinely no article; pick a candidate or leave it as a gap |
+| `pl: GAP` | genuinely no article → **ask the user** to pick a candidate or confirm the gap (step 3); never choose yourself |
+| report/answer in English although the prompt wasn't | `--report-lang` was omitted — set it in `init` (or `"report_language"` in `study.json`), translate `translations.<code>.json`, rerun |
 | `N requested month(s) not loaded yet` | trailing months absent from the project series; the window was trimmed and the warning says so |
 | `report does not fit on one page` | too much text/languages; split the study or shorten the verdict — HTML was still written |
 | `HTTP 404 … invalid route` | a malformed path (client bug), not missing data |

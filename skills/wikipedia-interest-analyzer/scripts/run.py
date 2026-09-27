@@ -149,6 +149,11 @@ def cmd_init(args: argparse.Namespace) -> None:
     print(f"  languages: {', '.join(languages)}")
     if study.get("report_language"):
         print(f"  report:    {study['report_language']}")
+    else:
+        print(
+            "  report:    (not set) -- pass --report-lang <the language the "
+            "user prompted in>"
+        )
     _print_window(label, warnings, indent="  ")
     if not window:
         print(
@@ -203,6 +208,10 @@ def stage_resolve(
                     f"      candidate: {candidate['title']}  "
                     f"({common.clip(candidate['snippet'])})"
                 )
+            print(
+                f"      next: ask the user to pick one of these candidates, "
+                f"or to skip {language}"
+            )
             print(
                 f"      to analyse one: run.py override --lang {language} "
                 f'--title "<candidate>"'
@@ -349,6 +358,11 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"languages: {', '.join(study['languages'])}")
     if study.get("report_language"):
         print(f"report:    {study['report_language']}")
+    else:
+        print(
+            "report:    (not set) -- pass --report-lang <the language the "
+            "user prompted in>"
+        )
     if study.get("table_key"):
         print(f"table key: {len(study['table_key'])} entries")
     label, warnings = _window_info(study)
@@ -380,6 +394,10 @@ def cmd_status(args: argparse.Namespace) -> None:
             print(f"  {language}: GAP")
             for candidate in resolution["candidates"].get(language, []):
                 print(f"      candidate: {candidate['title']}")
+            print(
+                f"      next: ask the user to pick one of these candidates, "
+                f"or to skip {language}"
+            )
 
 
 def cmd_override(args: argparse.Namespace) -> None:

@@ -93,6 +93,20 @@ def test_status_reports_the_resolved_article_and_the_gap(tmp_path, capsys):
     assert "cs: Přerušovaný půst" in status
     assert "pl: GAP" in status
     assert "candidate:" in status, "a gap must expose candidates to choose from"
+    assert (
+        "next: ask the user" in status
+    ), "a gap must tell the agent to ask, not to decide alone"
+
+
+def test_a_gap_tells_the_agent_to_ask_in_resolve_output_too(tmp_path, capsys):
+    """The gap decision happens right after `resolve`, before `status`."""
+    path = _init(tmp_path)
+    assert run_mod.main(["all", "--stage", "resolve", "--study", path]) == 0
+
+    out = capsys.readouterr().out
+    assert "pl: GAP -- no article for this topic" in out
+    assert "next: ask the user" in out
+    assert "to analyse one: run.py override" in out
 
 
 def test_override_is_recorded_in_the_study(tmp_path):
@@ -299,6 +313,37 @@ def test_init_hints_point_at_real_commands(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "run.py resolve --study" in out
     assert "run.py all --study" in out and "--out" in out
+
+
+def test_init_points_at_the_report_language_when_it_was_not_set(tmp_path, capsys):
+    """The default is English; the console must say so before resolve runs."""
+    path = str(tmp_path / "study.json")
+    assert run_mod.main([*GOLDEN_INIT_ARGS, "--study", path]) == 0
+    out = capsys.readouterr().out
+
+    assert "report:    (not set)" in out
+    assert "--report-lang <the language the user prompted in>" in out
+
+
+def test_init_prints_the_report_language_it_stored(tmp_path, capsys):
+    path = str(tmp_path / "study.json")
+    assert (
+        run_mod.main([*GOLDEN_INIT_ARGS, "--study", path, "--report-lang", "uk"])
+        == 0
+    )
+    out = capsys.readouterr().out
+
+    assert "report:    uk" in out
+    assert "(not set)" not in out
+
+
+def test_status_repeats_the_missing_report_language_hint(tmp_path, capsys):
+    """`status` is the pre-flight check; it must not go quiet on the default."""
+    path = _init(tmp_path)
+    capsys.readouterr()
+
+    assert run_mod.main(["status", "--study", path]) == 0
+    assert "report:    (not set)" in capsys.readouterr().out
 
 
 def test_init_warns_when_the_window_cannot_be_split_comparably(tmp_path, capsys):
