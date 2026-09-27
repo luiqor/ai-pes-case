@@ -11,7 +11,14 @@ from typing import Any
 
 import payloads
 import pytest
-from payloads import Resolution, ResolutionModel, StudyManifest, StudyManifestModel
+from payloads import (
+    CriteriaModel,
+    CriteriaSpec,
+    Resolution,
+    ResolutionModel,
+    StudyManifest,
+    StudyManifestModel,
+)
 
 
 def test_pydantic_models_mirror_the_typed_dicts():
@@ -24,6 +31,7 @@ def test_pydantic_models_mirror_the_typed_dicts():
     for typed, model in (
         (StudyManifest, StudyManifestModel),
         (Resolution, ResolutionModel),
+        (CriteriaSpec, CriteriaModel),
     ):
         assert set(typed.__annotations__) == set(model.model_fields), typed.__name__
 
@@ -197,4 +205,110 @@ def test_a_layer_free_criterion_needs_no_layer(study_factory):
     """The default criteria keep working for a study that fetches no layers."""
     study = study_factory()
     study["criteria"] = {"rank_by": "share_ppm"}
+    assert payloads.validate_study(study, "study.json") is study
+
+
+# ------------------------------------------------------- success criteria ---
+def _rule(**overrides: Any) -> dict[str, Any]:
+    """A valid ``criteria.success`` entry; tests override one field at a time."""
+    rule: dict[str, Any] = {
+        "id": "growing",
+        "metric": "yoy_share_pct",
+        "op": ">=",
+        "value": -5,
+    }
+    rule.update(overrides)
+    return rule
+
+
+def test_a_valid_success_rule_passes_through_unchanged(study_factory):
+    """Validation must return the original object, label included."""
+    study = study_factory()
+    study["criteria"] = {"success": [_rule(label="share ≥ −5%")]}
+
+    assert payloads.validate_study(study, "study.json") is study
+    assert study["criteria"]["success"][0]["label"] == "share ≥ −5%"
+
+
+def test_an_unknown_success_metric_lists_the_valid_ones(study_factory):
+    """A metric becomes a dict lookup at analyze time -- refuse it here."""
+    study = study_factory()
+    study["criteria"] = {"success": [_rule(metric="popularity")]}
+
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    message = str(excinfo.value)
+    assert "criteria.success.0.metric" in message
+    assert "share_ppm" in message
+
+
+def test_an_unknown_success_operator_lists_the_valid_ones(study_factory):
+    study = study_factory()
+    study["criteria"] = {"success": [_rule(op="!=")]}
+
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    message = str(excinfo.value)
+    assert "criteria.success.0.op" in message
+    assert ">=" in message
+
+
+def test_a_confidence_rule_takes_a_grade_not_a_number(study_factory):
+    """``confidence`` is ordinal; a number there would compare nothing."""
+    study = study_factory()
+    study["criteria"] = {"success": [_rule(metric="confidence", value="medium")]}
+    assert payloads.validate_study(study, "study.json") is study
+
+    study["criteria"] = {"success": [_rule(metric="confidence", value=2)]}
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    message = str(excinfo.value)
+    assert "criteria.success.0.value" in message
+    assert "'medium'" in message
+
+
+def test_a_numeric_rule_rejects_a_grade_string(study_factory):
+    study = study_factory()
+    study["criteria"] = {"success": [_rule(value="medium")]}
+
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    assert "value must be a number" in str(excinfo.value)
+
+
+def test_a_duplicate_rule_id_is_refused(study_factory):
+    """Two rules sharing an id would collide in the verdict map."""
+    study = study_factory()
+    study["criteria"] = {"success": [_rule(), _rule(metric="share_ppm")]}
+
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    message = str(excinfo.value)
+    assert "criteria.success.1" in message
+    assert "duplicate id 'growing'" in message
+
+
+def test_a_rule_id_must_be_a_slug(study_factory):
+    """The id addresses the verdict in JSON and prose; keep it addressable."""
+    study = study_factory()
+    study["criteria"] = {"success": [_rule(id="Growing?")]}
+
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    assert "criteria.success.0.id" in str(excinfo.value)
+
+
+def test_a_layer_bound_success_rule_demands_its_layer(study_factory):
+    """Grading a metric the study never fetches must refuse, not fall back."""
+    study = study_factory()
+    study["criteria"] = {"success": [_rule(metric="mobile_pct", value=60)]}
+
+    with pytest.raises(SystemExit) as excinfo:
+        payloads.validate_study(study, "study.json")
+    message = str(excinfo.value)
+    assert "criteria.success.0" in message
+    assert "'access'" in message
+    assert "layers" in message
+
+    study["layers"] = ["access"]
     assert payloads.validate_study(study, "study.json") is study

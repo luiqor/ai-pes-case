@@ -691,6 +691,34 @@ def _with_layers(analysis, layers=("access", "bot", "top")):
     return analysis
 
 
+def _with_criteria(analysis, *, label: str | None = None):
+    """An analysis carrying what analyze.py writes for two success rules."""
+    rules: list[dict] = [
+        {"id": "volume", "metric": "share_ppm", "op": ">=", "value": 50},
+        {"id": "growing", "metric": "yoy_share_pct", "op": ">", "value": 0},
+    ]
+    if label:
+        rules[0]["label"] = label
+    analysis["criteria"] = {
+        "success": rules,
+        "verdicts": {
+            "pl": {
+                "volume": {"value": 100.0, "passed": True},
+                "growing": {"value": -8.7, "passed": False},
+            },
+            "cs": {
+                "volume": {"value": 5.0, "passed": False},
+                "growing": {"value": 3.2, "passed": True},
+            },
+        },
+        "summary": {
+            "pl": {"met": 1, "total": 2, "not_evaluable": 0},
+            "cs": {"met": 1, "total": 2, "not_evaluable": 0},
+        },
+    }
+    return analysis
+
+
 def test_the_base_grid_is_unchanged_when_no_layer_was_measured(golden_analysis):
     """A study without layers must render the catalogue's grid, byte for byte."""
     assert report_mod.table_columns_for(golden_analysis) == report_mod.TABLE_COLUMNS
@@ -897,10 +925,15 @@ def test_the_full_layered_payload_still_fits_one_page(golden_analysis, tmp_path)
     three eat the one-page budget together. Rendering the metrics alone with
     no chart (as an earlier version of this test did) hid a PDF that
     overflowed by a point in actual use.
+
+    The user's success criteria are part of that real study too: their line
+    costs its own points, so it is added here rather than in a toy test
+    that would fit anything.
     """
     import chart as chart_mod
 
     _with_layers(golden_analysis)
+    _with_criteria(golden_analysis)
     # Exactly what analyze.py appends when all three layers were measured.
     ref = {"id": "limitation.layers_all"}
     golden_analysis["limitations"] += [i18n.english().render(ref)]
@@ -915,3 +948,93 @@ def test_the_full_layered_payload_still_fits_one_page(golden_analysis, tmp_path)
     report_mod.render_pdf(golden_analysis, chart_png, out)
 
     assert _page_count(out) == 1
+
+
+# ------------------------------------------------------- success criteria ---
+def test_the_html_carries_the_users_criteria(golden_analysis, tmp_path):
+    """The verdict the user asked for must be in the artifact they share."""
+    _with_criteria(golden_analysis)
+    out = tmp_path / "report.html"
+
+    report_mod.render_html(golden_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+
+    assert 'class="criteria"' in html
+    assert "Your criteria" in html
+    # Rule text is composed from the metric name, the operator, the threshold
+    # (the operator is HTML-escaped on the way into the markup).
+    assert "share of edition reading (per million) &gt;= 50" in html
+    # Per-language verdicts, then the n/m summaries.
+    assert "pl \u2713, cs \u2717" in html
+    assert "pl 1/2 met, cs 1/2 met" in html
+
+
+def test_a_manifest_label_wins_over_the_composed_metric_name(
+    golden_analysis, tmp_path
+):
+    """The agent writes the wording in the user's own terms; that wins."""
+    _with_criteria(golden_analysis, label="big enough")
+    out = tmp_path / "report.html"
+
+    report_mod.render_html(golden_analysis, None, out)
+
+    assert "big enough: pl \u2713, cs \u2717" in out.read_text(encoding="utf-8")
+
+
+def test_without_success_rules_no_criteria_block_is_printed(
+    golden_analysis, tmp_path
+):
+    """Absence stays absence: no heading, no line, no empty box."""
+    out = tmp_path / "report.html"
+
+    report_mod.render_html(golden_analysis, None, out)
+
+    assert 'class="criteria"' not in out.read_text(encoding="utf-8")
+    assert report_mod.criteria_line(golden_analysis) == ""
+    assert report_mod.criteria_block_html(golden_analysis) == ""
+
+
+def test_the_pdf_prints_exactly_one_line_of_criteria(golden_analysis, tmp_path):
+    """The one-page budget buys one line, not the HTML's full block."""
+    _with_criteria(golden_analysis)
+    out = tmp_path / "report.pdf"
+
+    assert (
+        report_mod.criteria_line(golden_analysis, i18n.english())
+        == "Your criteria: pl 1/2 met, cs 1/2 met"
+    )
+
+    report_mod.render_pdf(golden_analysis, None, out)
+
+    assert _page_count(out) == 1
+
+
+def test_a_gap_language_reads_as_not_measurable_not_as_a_zero(
+    gap_analysis, tmp_path
+):
+    """A language with no article cannot fail a rule about that article."""
+    gap_analysis["criteria"] = {
+        "success": [
+            {"id": "volume", "metric": "share_ppm", "op": ">=", "value": 50},
+        ],
+        "verdicts": {
+            "cs": {"volume": {"value": 5.0, "passed": False}},
+            "pl": {
+                "volume": {"value": None, "passed": None, "reason": "no article"},
+            },
+        },
+        "summary": {
+            "cs": {"met": 0, "total": 1, "not_evaluable": 0},
+            "pl": {"met": 0, "total": 1, "not_evaluable": 1},
+        },
+    }
+    out = tmp_path / "report.html"
+
+    assert report_mod.criteria_line(gap_analysis, i18n.english()) == (
+        "Your criteria: cs 0/1 met, pl not measurable (no article)"
+    )
+
+    report_mod.render_html(gap_analysis, None, out)
+    html = out.read_text(encoding="utf-8")
+    assert "pl not measurable (no article)" in html
+    assert "pl \u2014" in html

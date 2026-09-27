@@ -30,7 +30,13 @@ from typing import TextIO
 
 import common
 import i18n
-from payloads import AnalysisPayload, MessageRef
+from payloads import (
+    AnalysisPayload,
+    CriteriaResult,
+    CriterionVerdict,
+    MessageRef,
+    SuccessRule,
+)
 from reportlab.lib.colors import Color, HexColor
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
@@ -543,6 +549,150 @@ def ranked_by_text(
     tr = translator or i18n.english()
     label = tr.t(f"criterion.{ranked['criterion']}")
     return tr.t("report.ranked_by", criterion=label)
+
+
+def _criteria_of(analysis: AnalysisPayload) -> CriteriaResult | None:
+    """The ``criteria`` block, or ``None`` when the study asked for no rules."""
+    criteria = analysis.get("criteria")
+    if not criteria or not criteria.get("success"):
+        return None
+    return criteria
+
+
+def _rule_text(rule: SuccessRule, tr: i18n.Translator) -> str:
+    """Human wording of one rule: the manifest's own label, else metric+op+value."""
+    label = rule.get("label")
+    if label:
+        return str(label)
+    value = rule["value"]
+    if isinstance(value, str):
+        shown = tr.t(f"confidence.{value}")
+    else:
+        shown = f"{float(value):g}"
+    return f"{tr.t('metric.' + str(rule['metric']))} {rule['op']} {shown}"
+
+
+def _glyph(passed: bool | None) -> str:
+    """Verdict marks: measured pass, measured fail, or not measurable."""
+    if passed is True:
+        return "\u2713"
+    if passed is False:
+        return "\u2717"
+    return "\u2014"
+
+
+def _verdict_glyph(verdicts: dict[str, CriterionVerdict], rule_id: str) -> str:
+    """The mark for one rule in one language's verdict map."""
+    verdict = verdicts.get(rule_id)
+    if verdict is None:
+        return "\u2014"
+    return _glyph(verdict.get("passed"))
+
+
+def criteria_summaries(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> list[str]:
+    """One short ``pl 2/3 met`` string per language; gaps called out.
+
+    Args:
+        analysis: The ``analysis.json`` payload.
+        translator: Target language; English when omitted.
+
+    Returns:
+        The per-language summaries in verdict order (measured languages
+        first, coverage gaps last), or ``[]`` without criteria.
+    """
+    criteria = _criteria_of(analysis)
+    if not criteria:
+        return []
+    tr = translator or i18n.english()
+    gaps = set(analysis.get("gaps") or [])
+    summaries: list[str] = []
+    for language in criteria["verdicts"]:
+        if language in gaps:
+            summaries.append(tr.t("criteria.lang_gap", lang=language))
+            continue
+        counts = criteria["summary"][language]
+        if counts["not_evaluable"]:
+            summaries.append(
+                tr.t(
+                    "criteria.lang_summary_na",
+                    lang=language,
+                    met=counts["met"],
+                    total=counts["total"],
+                    na=counts["not_evaluable"],
+                )
+            )
+        else:
+            summaries.append(
+                tr.t(
+                    "criteria.lang_summary",
+                    lang=language,
+                    met=counts["met"],
+                    total=counts["total"],
+                )
+            )
+    return summaries
+
+
+def criteria_line(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> str:
+    """The single sentence the strictly-one-page PDF prints (``""`` if none).
+
+    The PDF gets one line, not a block: this is the verdict the reader needs,
+    and the one-page budget has no room for the full breakdown the HTML
+    carries (see ``criteria_block_html``).
+    """
+    tr = translator or i18n.english()
+    summaries = criteria_summaries(analysis, tr)
+    if not summaries:
+        return ""
+    return tr.t("criteria.line", summaries=tr.t("join.comma").join(summaries))
+
+
+def criteria_block_html(
+    analysis: AnalysisPayload, translator: i18n.Translator | None = None
+) -> str:
+    """The HTML block: every rule with each language's mark, then the summary.
+
+    Values are deliberately not printed -- units differ per metric (views,
+    per-million share, a grade) and the numbers live in ``analysis.json``;
+    the report shows the verdict the user asked for.
+    """
+    criteria = _criteria_of(analysis)
+    if not criteria:
+        return ""
+    tr = translator or i18n.english()
+    rows: list[str] = []
+    for rule in criteria["success"]:
+        results = [
+            f"{language} {_verdict_glyph(verdicts, str(rule['id']))}"
+            for language, verdicts in criteria["verdicts"].items()
+        ]
+        rows.append(
+            "<li>"
+            + html.escape(
+                tr.t(
+                    "criteria.rule",
+                    rule=_rule_text(rule, tr),
+                    results=tr.t("join.comma").join(results),
+                )
+            )
+            + "</li>"
+        )
+    summary = html.escape(
+        tr.t(
+            "criteria.summary",
+            summaries=tr.t("join.comma").join(criteria_summaries(analysis, tr)),
+        )
+    )
+    heading = html.escape(tr.t("criteria.heading"))
+    return (
+        f'<section class="criteria"><h3>{heading}</h3>'
+        f'<ul>{"".join(rows)}</ul>'
+        f'<p class="criteria-summary">{summary}</p></section>'
+    )
 
 
 def gaps_note(
@@ -1091,7 +1241,12 @@ def render_html(
     ranked_block = (
         f'<p class="ranked">{html.escape(ranked_text)}</p>' if ranked_text else ""
     )
-    legend_block = ranked_block + table_key_block(table_key, tr, columns=columns)
+    # The user's own pass/fail verdicts sit with the table they grade, after
+    # the decoding -- a reader checks the criteria once the numbers are in view.
+    criteria_block = criteria_block_html(analysis, tr)
+    legend_block = (
+        ranked_block + table_key_block(table_key, tr, columns=columns) + criteria_block
+    )
 
     bullets = "".join(
         f"<li>{html.escape(item)}</li>" for item in caveat_items(analysis, tr)
@@ -1440,16 +1595,24 @@ def render_pdf(
     # below the grid, so a reader meets the decoding while the table is still
     # in view rather than down among the caveats. The ranking sentence leads,
     # because it explains the order of the rows still on screen.
+    # One muted line under the table: the ranking reason (it explains the
+    # rows) and the user's verdict in the same breath. Two blocks would cost
+    # a second line -- and a real layered study with a chart was short by
+    # points, not lines, when these printed separately.
     ranked_text = ranked_by_text(analysis, tr)
-    if ranked_text:
+    criteria_text = criteria_line(analysis, tr)
+    note_line = " ".join(
+        part for part in (ranked_text, criteria_text) if part
+    )
+    if note_line:
         sheet.gap(2)
         sheet.text(
-            ranked_text,
+            note_line,
             FONT,
             7.2,
             9.4,
             color=MUTED,
-            what="ranked-by note",
+            what="ranking/criteria note",
         )
     key_items = table_key_items(table_key, tr, columns=columns)
     if key_items:

@@ -205,6 +205,28 @@ MESSAGES: dict[str, str] = {
     "criterion.yoy_share": "share growth",
     "criterion.mobile_share": "mobile share of views",
     "criterion.bot_share": "human traffic (lowest bot share)",
+    # --- report: the user's success criteria (criteria.success) -------------
+    # Glyphs and numbers in the payloads are data, never translated; only the
+    # sentences around them are here. Values live in analysis.json -- the
+    # report shows the verdict, not the arithmetic.
+    "criteria.heading": "Your criteria",
+    "criteria.rule": "{rule}: {results}",
+    "criteria.summary": "{summaries}",
+    "criteria.lang_summary": "{lang} {met}/{total} met",
+    "criteria.lang_summary_na": "{lang} {met}/{total} met ({na} not measurable)",
+    "criteria.lang_gap": "{lang} not measurable (no article)",
+    "criteria.line": "Your criteria: {summaries}",
+    # metric names for criteria.success rules without a manifest "label"
+    "metric.share_ppm": "share of edition reading (per million)",
+    "metric.article_total": "total article views in the window",
+    "metric.mean_monthly_views": "mean monthly views",
+    "metric.yoy_share_pct": "share growth (second half vs first)",
+    "metric.yoy_article_pct": "view growth (second half vs first)",
+    "metric.trend_r2": "share trend R-squared",
+    "metric.confidence": "confidence grade",
+    "metric.mobile_pct": "mobile share of views",
+    "metric.bot_share_pct": "bot share of views",
+    "metric.top_rank": "rank in the project's monthly top list",
     # --- joins and the fallback note ---------------------------------------
     "join.comma": ", ",
     "join.semicolon": "; ",

@@ -535,10 +535,13 @@ def fetch_series(
     layers = [str(layer) for layer in (study.get("layers") or [])]
     criteria = study.get("criteria") or {}
     rank_by = criteria.get("rank_by") if isinstance(criteria, dict) else None
+    success = criteria.get("success") if isinstance(criteria, dict) else None
     if layers:
         parameters["layers"] = layers
     if rank_by:
         parameters["rank_by"] = str(rank_by)
+    if success:
+        parameters["success"] = success
 
     desired = common.month_range(since, until)
     # Request one month beyond the window and discard it.
@@ -678,6 +681,9 @@ def main(argv: list[str] | None = None) -> int:
     layers = payload["parameters"].get("layers")
     if layers:
         print(f"  layers: {', '.join(layers)}")
+    success = payload["parameters"].get("success")
+    if success:
+        print(f"  criteria: {len(success)} success rule(s)")
     for language, item in payload["series"].items():
         print(
             f"  {language}: {item['article_title']} -- "

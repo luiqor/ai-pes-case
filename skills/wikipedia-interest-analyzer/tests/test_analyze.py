@@ -322,6 +322,7 @@ def _layered(
     all_agents: list[int] | None = None,
     top_rank: dict | None = None,
     rank_by: str | None = None,
+    success: list[dict[str, Any]] | None = None,
     second: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A series payload carrying optional layer data (and a second language)."""
@@ -353,6 +354,8 @@ def _layered(
     payload["parameters"]["layers"] = layers
     if rank_by:
         payload["parameters"]["rank_by"] = rank_by
+    if success:
+        payload["parameters"]["success"] = success
     return payload
 
 
@@ -524,3 +527,136 @@ def test_layer_limitations_are_added_only_for_measured_layers(
     assert "Device split measured here" in partial
     assert "Bot share" not in partial
     assert "Top rank" not in partial
+
+
+# ------------------------------------------------------- success criteria ---
+def test_success_rules_are_graded_per_language(make_series):
+    """The verdict is the rule applied to the data -- pass, fail, and n/m."""
+    labels = common.month_range("2024-10", "2026-08")
+    payload = make_series(
+        labels=labels,
+        article=[100] * len(labels),
+        project=[1_000_000] * len(labels),
+    )
+    payload["parameters"]["success"] = [
+        {"id": "volume", "metric": "share_ppm", "op": ">=", "value": 50},
+        {"id": "growing", "metric": "yoy_share_pct", "op": ">", "value": 0},
+        {"id": "visible", "metric": "mean_monthly_views", "op": "<", "value": 1000},
+    ]
+
+    analysis = analyze_mod.analyze(payload)
+    verdicts = analysis["criteria"]["verdicts"]["xx"]
+
+    # 100 views / 1,000,000 project views = 100 ppm; flat series = 0% growth.
+    assert verdicts["volume"] == {"value": 100.0, "passed": True}
+    assert verdicts["growing"]["passed"] is False
+    assert verdicts["visible"]["passed"] is True
+    assert analysis["criteria"]["summary"]["xx"] == {
+        "met": 2,
+        "total": 3,
+        "not_evaluable": 0,
+    }
+    # The rules travel into analysis.json verbatim -- the agent's own words.
+    assert analysis["criteria"]["success"][0]["id"] == "volume"
+
+
+def test_an_unmeasurable_criterion_is_null_never_false(make_series):
+    """A rule on data that was not fetched is unmeasurable, not failed."""
+    labels = common.month_range("2024-10", "2026-08")
+    payload = _layered(
+        make_series,
+        labels=labels,
+        article=[100] * len(labels),
+        project=[1_000_000] * len(labels),
+        top_rank={"month": "2026-08", "rank": None, "list_size": 1000},
+        success=[
+            {"id": "bots", "metric": "bot_share_pct", "op": "<", "value": 20},
+            {"id": "listed", "metric": "top_rank", "op": "<=", "value": 100},
+        ],
+    )
+
+    verdicts = analyze_mod.analyze(payload)["criteria"]["verdicts"]["pl"]
+
+    assert verdicts["bots"] == {
+        "value": None,
+        "passed": None,
+        "reason": "layer not measured",
+    }
+    assert verdicts["listed"] == {
+        "value": None,
+        "passed": None,
+        "reason": "outside the top list",
+    }
+
+
+def test_a_coverage_gap_reports_every_rule_as_not_measurable(make_series):
+    """A language with no article cannot fail a criterion about that article."""
+    labels = common.month_range("2024-10", "2026-08")
+    payload = make_series(
+        labels=labels,
+        article=[100] * len(labels),
+        project=[1_000_000] * len(labels),
+        gaps=["yy"],
+    )
+    payload["parameters"]["success"] = [
+        {"id": "volume", "metric": "share_ppm", "op": ">=", "value": 50},
+    ]
+
+    analysis = analyze_mod.analyze(payload)
+
+    assert analysis["criteria"]["verdicts"]["yy"]["volume"] == {
+        "value": None,
+        "passed": None,
+        "reason": "no article",
+    }
+    assert analysis["criteria"]["summary"]["yy"] == {
+        "met": 0,
+        "total": 1,
+        "not_evaluable": 1,
+    }
+    # The measured language still gets its real verdict beside the gap.
+    assert analysis["criteria"]["verdicts"]["xx"]["volume"]["passed"] is True
+
+
+def test_growth_unavailable_is_reported_as_such(make_series):
+    """Too short for halves -> the growth rule says so instead of guessing."""
+    labels = common.month_range("2026-01", "2026-06")
+    payload = make_series(
+        labels=labels,
+        article=[50] * len(labels),
+        project=[1_000_000] * len(labels),
+    )
+    payload["parameters"]["success"] = [
+        {"id": "growing", "metric": "yoy_share_pct", "op": ">=", "value": -5},
+    ]
+
+    verdict = analyze_mod.analyze(payload)["criteria"]["verdicts"]["xx"]["growing"]
+
+    assert verdict["passed"] is None
+    assert verdict["reason"] == "growth unavailable"
+
+
+def test_confidence_compares_on_its_ordinal_scale(make_series):
+    """``medium >= low`` is a grade comparison, not a string one."""
+    labels = common.month_range("2024-10", "2026-08")
+    payload = make_series(
+        labels=labels,
+        article=[100] * len(labels),
+        project=[1_000_000] * len(labels),
+    )
+    payload["parameters"]["success"] = [
+        {"id": "elite", "metric": "confidence", "op": ">=", "value": "high"},
+        {"id": "any_grade", "metric": "confidence", "op": ">=", "value": "low"},
+    ]
+
+    analysis = analyze_mod.analyze(payload)
+    grade = analysis["metrics"]["xx"]["confidence"]
+    verdicts = analysis["criteria"]["verdicts"]["xx"]
+
+    assert verdicts["any_grade"]["passed"] is True  # every grade >= low
+    assert verdicts["elite"]["passed"] is (grade == "high")
+
+
+def test_a_study_without_success_rules_gains_no_new_key(golden_analysis):
+    """Byte-identity: criteria are opt-in, and absence stays absence."""
+    assert "criteria" not in golden_analysis

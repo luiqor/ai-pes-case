@@ -740,6 +740,74 @@ def test_status_says_nothing_about_a_study_that_asked_for_no_extras(
 
     assert "layers:" not in out
     assert "ranking:" not in out
+    assert "criteria:" not in out
+
+
+def test_status_surfaces_the_success_criteria(tmp_path, capsys):
+    """Step 2 must show the thresholds the report will grade against."""
+    path = _init(tmp_path)
+    study = common.read_json(path)
+    study["criteria"] = {
+        "success": [
+            {"id": "volume", "metric": "share_ppm", "op": ">=", "value": 50},
+            {"id": "growing", "metric": "yoy_share_pct", "op": ">", "value": 0},
+        ]
+    }
+    common.write_json(path, study)
+
+    assert run_mod.main(["status", "--study", path]) == 0
+
+    assert "criteria:  2 success rule(s)" in capsys.readouterr().out
+
+
+def test_success_criteria_flow_from_manifest_to_report(tmp_path):
+    """End to end: the user's own threshold is graded in the shared report.
+
+    The agent writes the rule once; fetch echoes it, analyze grades it, and
+    the report states the verdict -- no step re-derives it in prose.
+    """
+    path = _init(tmp_path)
+    study = common.read_json(path)
+    study["criteria"] = {
+        "success": [
+            # share_ppm can never reach 10 million (it is a share of *all*
+            # reading), so this rule must fail everywhere -- deterministically.
+            {"id": "volume", "metric": "share_ppm", "op": ">=", "value": 0},
+            {
+                "id": "impossible",
+                "metric": "share_ppm",
+                "op": ">=",
+                "value": 10_000_000,
+            },
+        ]
+    }
+    common.write_json(path, study)
+    out = tmp_path / "out"
+
+    assert run_mod.main(["all", "--study", path, "--out", str(out)]) == 0
+
+    analysis = common.read_json(out / "analysis.json")
+    verdicts = analysis["criteria"]["verdicts"]
+    gaps = set(analysis["gaps"])
+    assert verdicts, "every studied language carries a verdict"
+    for language, language_verdicts in verdicts.items():
+        if language in gaps:
+            # pl has no article: neither rule can be evaluated, none fail.
+            assert language_verdicts["volume"]["passed"] is None
+            assert language_verdicts["impossible"]["passed"] is None
+        else:
+            assert language_verdicts["volume"]["passed"] is True
+            assert language_verdicts["impossible"]["passed"] is False
+    for language, counts in analysis["criteria"]["summary"].items():
+        if language in gaps:
+            assert counts == {"met": 0, "total": 2, "not_evaluable": 2}
+        else:
+            assert counts == {"met": 1, "total": 2, "not_evaluable": 0}
+
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert "Your criteria" in html
+    assert "1/2 met" in html
+    assert (out / "report.pdf").is_file()
 
 
 def test_report_stage_renders_the_layer_columns_and_the_ranking(tmp_path):

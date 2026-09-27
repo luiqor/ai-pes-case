@@ -151,6 +151,20 @@
   .table-key dt { font-weight: 700; color: var(--accent); white-space: nowrap; }
   .table-key dd { margin: 0; color: var(--muted); }
 
+  /* ---- the user's own success criteria (criteria.success) ---- */
+  .criteria {
+    margin: 0 0 12pt; padding: 8pt 10pt;
+    background: #f6f9fc; border-left: 3pt solid var(--gold);
+  }
+  .table-key + .criteria { margin-top: -6pt; }
+  .criteria h3 {
+    font-size: 7.5pt; margin: 0 0 4pt; color: var(--accent);
+    text-transform: uppercase; letter-spacing: .8pt;
+  }
+  .criteria ul { margin: 0 0 4pt; padding-left: 12pt; }
+  .criteria li { font-size: 7.5pt; margin-bottom: 2pt; }
+  .criteria-summary { font-size: 7.5pt; color: var(--muted); margin: 0; }
+
   /* ---- caveats ---- */
   h2 {
     font-size: 9.5pt; margin: 0 0 5pt; color: var(--accent);

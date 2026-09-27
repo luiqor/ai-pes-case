@@ -368,6 +368,7 @@ def test_without_layers_no_layer_keys_and_no_extra_requests(resolve_study):
 
     assert "layers" not in payload["parameters"]
     assert "rank_by" not in payload["parameters"]
+    assert "success" not in payload["parameters"]
     for entry in payload["series"].values():
         assert "access_views" not in entry
         assert "all_agents_views" not in entry
@@ -420,3 +421,19 @@ def test_a_malformed_top_body_stops_the_fetch_loudly(resolve_study):
             client=LayerClient(top_body={"items": [{"unexpected": True}]}),
         )
     assert "error [bad_body]" in str(excinfo.value)
+
+
+def test_success_rules_echo_into_parameters_for_the_analysis_stage(resolve_study):
+    """``criteria.success`` travels with the data, like ``layers``.
+
+    ``analyze.py`` reads ``series.json`` alone, so the user's thresholds must
+    be in the payload -- the same reason the selection is echoed. The rules
+    cross verbatim: the agent wrote them, analysis grades them.
+    """
+    study = resolve_study(overrides={"pl": "Post"})
+    rules = [{"id": "volume", "metric": "share_ppm", "op": ">=", "value": 50}]
+    study["criteria"] = {"success": rules}
+
+    payload = fetch_mod.fetch_series(study, today=GOLDEN_TODAY)
+
+    assert payload["parameters"]["success"] == rules

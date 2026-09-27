@@ -191,3 +191,78 @@ different confidence grade, never a second page. The report prints its ranking
 reason under the table (`Ranked by …`) so a reordered table explains itself,
 and a layer-bound criterion without its layer is refused at the manifest
 (`payloads.validate_study`) instead of silently falling back to another order.
+
+## 10. Success criteria (`criteria.success`)
+
+The user's own bar for success, written into `study.json` as a list of
+thresholds and **graded by this code**, not by prose in the chat. Each rule
+*compares* a metric this stage already computed — it never computes a new one,
+which is what keeps a verdict data-grounded (SKILL.md Rule 4) and testable.
+
+```json
+"criteria": { "success": [
+  {"id": "growing", "metric": "yoy_share_pct", "op": ">=", "value": -5}
+] }
+```
+
+| `metric` | Reads | Needs layer |
+|---|---|---|
+| `share_ppm` | `metrics.<lang>.share_ppm` | — |
+| `article_total` | `metrics.<lang>.article_total` | — |
+| `mean_monthly_views` | `metrics.<lang>.mean_monthly_views` | — |
+| `yoy_share_pct` | `metrics.<lang>.yoy.share_pct` | — |
+| `yoy_article_pct` | `metrics.<lang>.yoy.article_pct` | — |
+| `trend_r2` | `metrics.<lang>.trend.share.r2` | — |
+| `confidence` | `metrics.<lang>.confidence` (ordinal: `high > medium > low`) | — |
+| `mobile_pct` | `metrics.<lang>.access_split.mobile_pct` | `access` |
+| `bot_share_pct` | `metrics.<lang>.bot_share_pct` | `bot` |
+| `top_rank` | `metrics.<lang>.top_rank.rank` (lower is better; ops `<= < == >=` are the natural ones) | `top` |
+
+Operators: `>=`, `>`, `<=`, `<`, `==`. `value` is a number, except for
+`confidence`, which takes `low`/`medium`/`high` — a grade is compared on its
+ordinal scale, never as text. Everything else (unknown metric, unknown
+operator, duplicate `id`, a grade string on a numeric metric, a layer-bound
+rule without its layer) is refused at the manifest, with the valid choices
+named in the message.
+
+### Verdict semantics
+
+Per language, per rule: `criteria.verdicts.<lang>.<id> = {value, passed}`
+with `criteria.summary.<lang> = {met, total, not_evaluable}`.
+
+`passed: null` **with a `reason`** means the rule could not be evaluated —
+never `false`:
+
+| `reason` | When |
+|---|---|
+| `no article` | the language is a coverage gap |
+| `growth unavailable` | the window is too short for the two halves |
+| `layer not measured` | the rule's layer was not fetched (hand-edited `series.json` only; the manifest refuses this combination) |
+| `outside the top list` | `top_rank.rank` is `null` |
+| `unknown metric` / `not measurable` | hand-edited payload the closed list cannot answer |
+
+An unmeasurable criterion is reported as unmeasurable: counting it as a
+failure would invent a verdict the data never gave, and counting it as a pass
+would hide that we do not know.
+
+### Where it shows
+
+* `analysis.json` → the `criteria` block, **only when the manifest asked for
+  one**: a study without `success` keeps exactly the payload shape it always
+  had (pinned by test).
+* HTML → a "Your criteria" block under the table: one line per rule with
+  each language's mark (`✓`/`✗`/`—`), then the `n/m` summaries.
+* PDF → **one line**, merged with the ranking note when both exist
+  (`Ranked by … Your criteria: pl 2/3 met, cs 1/3 met`): the verdict the
+  reader needs, while the full breakdown stays in `analysis.json` and the
+  HTML — two separate lines cost points the strictly-one-page PDF does not
+  have in a real layered study.
+* `run.py status` → `criteria: N success rule(s)` at review time.
+
+Design decisions: the metric list is closed because a rule that could
+formulate its own arithmetic would move the verdict out of the tested code
+and back into the model; thresholds are the **user's** design parameters,
+echoed verbatim (`parameters.success`, the same trick as `rank_by`/`layers`),
+and only the comparison is ours. Rule values are deliberately *not* printed
+in the report (units differ per metric): the report states the verdict, the
+JSON carries the number.

@@ -372,6 +372,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     criteria = study.get("criteria") or {}
     if isinstance(criteria, dict) and criteria.get("rank_by"):
         print(f"ranking:   {criteria['rank_by']}")
+    if isinstance(criteria, dict) and criteria.get("success"):
+        print(f"criteria:  {len(criteria['success'])} success rule(s)")
     label, warnings = _window_info(study)
     _print_window(label, warnings)
     if study.get("overrides"):

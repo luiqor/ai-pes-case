@@ -29,11 +29,15 @@ import pandas as pd
 from payloads import (
     AnalysisPayload,
     Comparison,
+    CriteriaResult,
+    CriteriaSummary,
+    CriterionVerdict,
     LanguageMetrics,
     LanguageSeries,
     MessageRef,
     SeasonalityProfile,
     SeriesPayload,
+    SuccessRule,
     TrendFit,
     WindowRange,
     WindowSplit,
@@ -506,6 +510,142 @@ def analyze_language(language: str, item: LanguageSeries) -> LanguageMetrics:
 
 
 # --------------------------------------------------------------------------
+# The user's success criteria (study.json "criteria.success")
+#
+# A rule *compares* a metric this stage already computed -- it never
+# computes a new one -- so the verdict stays data-grounded (Rule 4) and the
+# whole evaluation runs offline, like the rest of this stage.
+# --------------------------------------------------------------------------
+_GRADE_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def _metric_value(
+    metrics: LanguageMetrics, metric: str
+) -> tuple[float | str | None, str | None]:
+    """Read one closed-list metric; ``(value, None)`` or ``(None, why)``.
+
+    ``why`` is a short reason the report can print beside a rule that could
+    not be evaluated: an unmeasurable criterion is reported as such, never
+    as a failure.
+    """
+    if metric == "share_ppm":
+        return metrics["share_ppm"], None
+    if metric == "article_total":
+        return metrics["article_total"], None
+    if metric == "mean_monthly_views":
+        return metrics["mean_monthly_views"], None
+    if metric == "yoy_share_pct":
+        value = metrics["yoy"].get("share_pct")
+        return (value, None) if value is not None else (None, "growth unavailable")
+    if metric == "yoy_article_pct":
+        value = metrics["yoy"].get("article_pct")
+        return (value, None) if value is not None else (None, "growth unavailable")
+    if metric == "trend_r2":
+        return metrics["trend"]["share"]["r2"], None
+    if metric == "confidence":
+        return metrics["confidence"], None
+    if metric == "mobile_pct":
+        split = metrics.get("access_split")
+        if split is None:
+            return None, "layer not measured"
+        return split["mobile_pct"], None
+    if metric == "bot_share_pct":
+        value = metrics.get("bot_share_pct")
+        if value is None:
+            return None, "layer not measured"
+        return value, None
+    if metric == "top_rank":
+        rank = metrics.get("top_rank")
+        if rank is None:
+            return None, "layer not measured"
+        if rank["rank"] is None:
+            return None, "outside the top list"
+        return rank["rank"], None
+    # Anything outside the closed list is a hand-edited series.json; report
+    # it as unmeasurable instead of pretending the rule was never asked.
+    return None, "unknown metric"
+
+
+def _compare(value: float | str, op: str, threshold: float | str) -> bool:
+    """Apply the rule's operator; ``confidence`` compares on its grade order."""
+    if isinstance(value, str) and isinstance(threshold, str):
+        left = float(_GRADE_RANK[value])
+        right = float(_GRADE_RANK[threshold])
+    else:
+        left = float(value)
+        right = float(threshold)
+    if op == ">=":
+        return left >= right
+    if op == ">":
+        return left > right
+    if op == "<=":
+        return left <= right
+    if op == "<":
+        return left < right
+    return left == right
+
+
+def _evaluate_criteria(
+    rules: list[SuccessRule],
+    metrics: dict[str, LanguageMetrics],
+    gaps: list[str],
+) -> CriteriaResult:
+    """Grade every rule for every language; ``passed`` stays ``None`` when
+    the metric could not be measured (gap, missing layer, absent growth)."""
+    verdicts: dict[str, dict[str, CriterionVerdict]] = {}
+    summary: dict[str, CriteriaSummary] = {}
+    for language in [*metrics, *(g for g in gaps if g not in metrics)]:
+        if language in gaps:
+            verdicts[language] = {
+                str(rule["id"]): {
+                    "value": None,
+                    "passed": None,
+                    "reason": "no article",
+                }
+                for rule in rules
+            }
+            summary[language] = {
+                "met": 0,
+                "total": len(rules),
+                "not_evaluable": len(rules),
+            }
+            continue
+        language_verdicts: dict[str, CriterionVerdict] = {}
+        met = 0
+        not_evaluable = 0
+        for rule in rules:
+            value, reason = _metric_value(metrics[language], str(rule["metric"]))
+            if value is None:
+                passed: bool | None = None
+                reason = reason or "not measurable"
+            else:
+                try:
+                    passed = _compare(value, str(rule["op"]), rule["value"])
+                except (KeyError, TypeError, ValueError):
+                    passed, reason = None, "not measurable"
+            if passed is None:
+                not_evaluable += 1
+                language_verdicts[str(rule["id"])] = {
+                    "value": value,
+                    "passed": None,
+                    "reason": reason or "not measurable",
+                }
+            else:
+                met += int(passed)
+                language_verdicts[str(rule["id"])] = {
+                    "value": value,
+                    "passed": passed,
+                }
+        verdicts[language] = language_verdicts
+        summary[language] = {
+            "met": met,
+            "total": len(rules),
+            "not_evaluable": not_evaluable,
+        }
+    return {"success": list(rules), "verdicts": verdicts, "summary": summary}
+
+
+# --------------------------------------------------------------------------
 # Composition
 # --------------------------------------------------------------------------
 def build_headline(
@@ -787,6 +927,15 @@ def analyze(payload: SeriesPayload) -> AnalysisPayload:
             "order": _rank_by_criterion(metrics, str(rank_by)),
         }
 
+    # The user's own success thresholds (study.json "criteria.success"),
+    # echoed through series.json parameters like rank_by. Absent means the
+    # analysis keeps exactly the keys it always had -- no new one, so a
+    # study without criteria is byte-for-byte what it was.
+    success = payload["parameters"].get("success")
+    criteria_result = (
+        _evaluate_criteria(list(success), metrics, gaps) if success else None
+    )
+
     # One composition, two consumers: the English strings below are the
     # *rendering of* the refs stored beside them, so a report in any other
     # language says exactly what analysis.json says -- only in other words.
@@ -795,7 +944,7 @@ def analyze(payload: SeriesPayload) -> AnalysisPayload:
     assumption_refs = build_assumptions()
     limitation_refs = build_limitations(payload, metrics, gaps)
 
-    return {
+    result: AnalysisPayload = {
         "generated_at": payload.get("generated_at") or date.today().isoformat(),
         "topic": payload["topic"],
         "qid": payload.get("qid"),
@@ -812,6 +961,9 @@ def analyze(payload: SeriesPayload) -> AnalysisPayload:
         "limitations": [english.render(ref) for ref in limitation_refs],
         "limitations_i18n": limitation_refs,
     }
+    if criteria_result is not None:
+        result["criteria"] = criteria_result
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -31,7 +31,13 @@ from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
 # URL builders in ``api.py`` and re-exported here, so the manifest and the
 # paths cannot disagree about the same enum.
 from api import ACCESS_VALUES, AGENT_VALUES  # noqa: F401  (re-export)
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
 
 
 # --------------------------------------------------------------------------
@@ -61,14 +67,34 @@ class Resolution(TypedDict, total=False):
     labels: dict[str, str]
 
 
-class CriteriaSpec(TypedDict, total=False):
-    """``criteria``: how the user wants the audiences ranked in the report.
+class SuccessRule(TypedDict, total=False):
+    """One ``criteria.success`` entry: a comparison the analysis grades.
 
-    Only ``rank_by`` is read today; extra keys a hand-edited manifest carries
-    survive validation untouched (see :func:`validate_study`).
+    A rule *compares* an existing metric, it never computes one -- the metric
+    list is closed (``CRITERIA_METRIC_VALUES``) so the verdict stays
+    data-grounded and the agent cannot smuggle arithmetic past the tests.
+    """
+
+    id: str
+    metric: str
+    op: str
+    #: number for every metric except ``confidence`` (which takes a grade).
+    value: float | str
+    #: optional agent-written wording; shown instead of the metric name.
+    label: str
+
+
+class CriteriaSpec(TypedDict, total=False):
+    """``criteria``: how the user wants the report ranked and graded.
+
+    ``rank_by`` orders the comparison table; ``success`` is the user's own
+    list of pass/fail thresholds, evaluated per language by ``analyze.py``.
+    Extra keys a hand-edited manifest carries survive validation untouched
+    (see :func:`validate_study`).
     """
 
     rank_by: str
+    success: list[SuccessRule]
 
 
 class StudyManifest(TypedDict):
@@ -124,6 +150,9 @@ class RequestParameters(TypedDict):
     granularity: str
     layers: NotRequired[list[str]]
     rank_by: NotRequired[str]
+    #: study.json ``criteria.success`` -- echoed so analyze can grade the
+    #: user's thresholds without reopening the manifest (same trick as rank_by).
+    success: NotRequired[list[SuccessRule]]
 
 
 class TopRank(TypedDict):
@@ -357,6 +386,39 @@ class MessageRef(TypedDict, total=False):
     concat: list[MessageRef]
 
 
+class CriterionVerdict(TypedDict, total=False):
+    """One ``criteria.success`` rule, graded for one language.
+
+    ``passed: null`` means the rule could not be evaluated (a coverage gap,
+    an unavailable growth window, a rank outside the top list): never a
+    failure -- an unmeasurable criterion must not read as a failed one.
+    """
+
+    value: float | str | None
+    passed: bool | None
+    reason: str
+
+
+class CriteriaSummary(TypedDict):
+    """How many of the user's rules one language met (``n/m``)."""
+
+    met: int
+    total: int
+    not_evaluable: int
+
+
+class CriteriaResult(TypedDict):
+    """``analysis.json`` ``criteria``: the rules plus their verdicts.
+
+    Present only when the manifest asked for ``criteria.success``; a study
+    without one keeps an analysis.json byte-for-byte as it always was.
+    """
+
+    success: list[SuccessRule]
+    verdicts: dict[str, dict[str, CriterionVerdict]]
+    summary: dict[str, CriteriaSummary]
+
+
 class AnalysisPayload(TypedDict):
     """``analysis.json`` -- metrics, rankings, headline, assumptions, caveats.
 
@@ -374,6 +436,8 @@ class AnalysisPayload(TypedDict):
     headline: str
     metrics: dict[str, LanguageMetrics]
     comparison: Comparison
+    #: The user's success thresholds and their verdicts; only when asked for.
+    criteria: NotRequired[CriteriaResult]
     gaps: list[str]
     warnings: list[str]
     assumptions: list[str]
@@ -406,6 +470,31 @@ LAYER_VALUES = ("access", "bot", "top")
 RANK_BY_VALUES = ("share_ppm", "yoy_share", "mobile_share", "bot_share")
 RANK_BY_REQUIRES_LAYER = {"mobile_share": "access", "bot_share": "bot"}
 
+# Success criteria (study.json "criteria.success"): a *closed* list of the
+# metrics a rule may compare, the operators it may use, and the layer each
+# layer-bound metric needs. Metrics are existing analysis.json fields only --
+# a rule compares, it never computes, which keeps the verdict data-grounded.
+CRITERIA_METRIC_VALUES = (
+    "share_ppm",
+    "article_total",
+    "mean_monthly_views",
+    "yoy_share_pct",
+    "yoy_article_pct",
+    "trend_r2",
+    "confidence",
+    "mobile_pct",
+    "bot_share_pct",
+    "top_rank",
+)
+CRITERIA_OPS = (">=", ">", "<=", "<", "==")
+CRITERIA_METRIC_REQUIRES_LAYER = {
+    "mobile_pct": "access",
+    "bot_share_pct": "bot",
+    "top_rank": "top",
+}
+# ``confidence`` is graded, not numeric: the rule compares the ordinal scale.
+CRITERIA_CONFIDENCE_VALUES = ("low", "medium", "high")
+
 
 class StudyWindowModel(BaseModel):
     """``window``: both ends optional, each a real ``YYYY-MM`` month."""
@@ -435,12 +524,66 @@ class ResolutionModel(BaseModel):
     labels: dict[str, str] = {}
 
 
+class SuccessRuleModel(BaseModel):
+    """One ``criteria.success`` entry: id, metric, operator, threshold.
+
+    ``value`` is validated against ``metric`` -- a grade string only makes
+    sense for ``confidence``, a number for everything else -- because a rule
+    silently ignored (or worse, coerced) would change who passes.
+    """
+
+    id: Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{0,31}$")]
+    metric: Literal[
+        "share_ppm",
+        "article_total",
+        "mean_monthly_views",
+        "yoy_share_pct",
+        "yoy_article_pct",
+        "trend_r2",
+        "confidence",
+        "mobile_pct",
+        "bot_share_pct",
+        "top_rank",
+    ]
+    op: Literal[">=", ">", "<=", "<", "=="]
+    value: float | str
+    label: str | None = None
+
+    @field_validator("value")
+    @classmethod
+    def value_matches_the_metric(
+        cls, value: float | str, info: ValidationInfo
+    ) -> float | str:
+        """Reject a ``value`` whose type does not belong to its metric.
+
+        A field validator (not a model one) so the error lands on
+        ``criteria.success.N.value`` and names the field that is wrong.
+        ``metric`` is validated first, hence visible in ``info.data``.
+        """
+        metric = info.data.get("metric")
+        if metric is None:  # the metric itself failed; its error is the real one
+            return value
+        if metric == "confidence":
+            if not isinstance(value, str) or value not in CRITERIA_CONFIDENCE_VALUES:
+                raise ValueError(
+                    "a 'confidence' rule takes the grade "
+                    f"{', '.join(repr(g) for g in CRITERIA_CONFIDENCE_VALUES)}"
+                )
+        elif isinstance(value, str):
+            raise ValueError(
+                "value must be a number; grade strings apply only to the "
+                "'confidence' metric"
+            )
+        return value
+
+
 class CriteriaModel(BaseModel):
-    """``criteria``: only ``rank_by`` is interpreted; unknown keys ignored."""
+    """``criteria``: ``rank_by`` orders the table, ``success`` grades it."""
 
     rank_by: Literal["share_ppm", "yoy_share", "mobile_share", "bot_share"] | None = (
         None
     )
+    success: list[SuccessRuleModel] = []
 
 
 class StudyManifestModel(BaseModel):
@@ -502,9 +645,11 @@ def validate_study(raw: object, source: str | Path) -> StudyManifest:
             for err in exc.errors()
         )
         raise SystemExit(f"error: invalid study manifest {source}: {detail}") from exc
-    # Cross-field check the shape alone cannot express: a layer-bound ranking
+    # Cross-field checks the shape alone cannot express: a layer-bound ranking
     # criterion is meaningless without its data layer, and a report that
     # silently fell back to another ranking would be worse than a refusal.
+    # The same holds for a success rule, plus one more: two rules sharing an
+    # id would collide in the verdict map.
     if isinstance(raw, dict):
         criteria = raw.get("criteria")
         rank_by = criteria.get("rank_by") if isinstance(criteria, dict) else None
@@ -516,6 +661,25 @@ def validate_study(raw: object, source: str | Path) -> StudyManifest:
                 f"'{rank_by}' requires the '{needed}' data layer -- add "
                 f"'\"{needed}\"' to the 'layers' list"
             )
+        rules = criteria.get("success") if isinstance(criteria, dict) else None
+        seen: set[str] = set()
+        for index, rule in enumerate(rules or []):
+            rule_id = str(rule.get("id", ""))
+            if rule_id in seen:
+                raise SystemExit(
+                    f"error: invalid study manifest {source}: "
+                    f"criteria.success.{index}: duplicate id '{rule_id}'"
+                )
+            seen.add(rule_id)
+            metric = str(rule.get("metric", ""))
+            needed = CRITERIA_METRIC_REQUIRES_LAYER.get(metric)
+            if needed and needed not in layers:
+                raise SystemExit(
+                    f"error: invalid study manifest {source}: "
+                    f"criteria.success.{index} '{metric}' requires the "
+                    f"'{needed}' data layer -- add '\"{needed}\"' to the "
+                    f"'layers' list"
+                )
     return cast(StudyManifest, raw)
 
 
