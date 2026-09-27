@@ -92,8 +92,8 @@ def render(
             x,
             series["article_views"],
             marker="o",
-            markersize=3,
-            linewidth=1.6,
+            markersize=4,
+            linewidth=2.4,
             color=colour,
             label=name,
         )
@@ -101,8 +101,8 @@ def render(
             x,
             series["share_ppm"],
             marker="o",
-            markersize=3,
-            linewidth=1.6,
+            markersize=4,
+            linewidth=2.4,
             color=colour,
             label=name,
         )
@@ -131,7 +131,7 @@ def render(
             0.005,
             tr.t("chart.gaps_note", langs=tr.t("join.comma").join(analysis["gaps"])),
             ha="center",
-            fontsize=8,
+            fontsize=9,
             style="italic",
             color="#666666",
         )
@@ -140,11 +140,11 @@ def render(
     indices = _tick_indices(len(labels))
     ax_share.set_xticks(indices)
     ax_share.set_xticklabels(
-        [labels[i] for i in indices], rotation=45, ha="right", fontsize=8
+        [labels[i] for i in indices], rotation=45, ha="right", fontsize=9
     )
     for axis in (ax_views, ax_share):
-        axis.grid(True, alpha=0.3, linewidth=0.6)
-        axis.legend(fontsize=8, loc="upper right", framealpha=0.9)
+        axis.grid(True, alpha=0.5, linewidth=0.9)
+        axis.legend(fontsize=9, loc="upper right", framealpha=0.9)
 
     fig.tight_layout(rect=(0, 0.03, 1, 0.95))
 
